@@ -1,0 +1,718 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit' if edit else 'New' }} Bill — Munshi{% endblock %}
+{% block content %}
+<div class="container-fluid px-4 pb-5">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">{{ t('Edit Bill:') + ' ' + bill.bill_no if edit else t('New Bill') + ' — ' + next_bill_no }}</h5>
+    {% if not edit %}
+    <a href="{{ url_for('extract_upload') }}" class="btn btn-warning">
+      <i class="bi bi-camera me-1"></i>{{ t('Extract from Invoice Photo') }}
+    </a>
+    {% endif %}
+  </div>
+
+  {% if not edit and not prefilled %}
+  <div class="alert alert-info d-flex align-items-center mb-3" style="border-left: 4px solid var(--jl-accent)">
+    <i class="bi bi-magic me-2 fs-4"></i>
+    <div class="flex-grow-1">
+      <strong>Tip:</strong> Have a photo of the invoice / PoD?
+      <a href="{{ url_for('extract_upload') }}" class="alert-link">Upload it</a>
+      and AI will auto-fill recipient, GSTIN, invoice number, weight and quantity.
+      You only fill in the freight rate.
+    </div>
+  </div>
+  {% endif %}
+
+  {% if prefilled %}
+  <div class="alert alert-warning d-flex align-items-center">
+    <i class="bi bi-magic me-2 fs-4"></i>
+    <div class="flex-grow-1">
+      <strong>AI pre-filled this bill from your uploaded VBL invoice(s).</strong>
+      Verify every field — especially weight, qty and consignee — then add the missing
+      Freight Rate / Overload to set the Value of Supply.
+    </div>
+  </div>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('edit_bill', bill_id=bill.id) if edit else url_for('new_bill') }}" id="billForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="delivery_count" id="delivery_count" value="{{ bill.deliveries|length if bill else 1 }}">
+    {% if bill and bill._from_ledger_id %}
+      <input type="hidden" name="from_ledger_id" value="{{ bill._from_ledger_id }}">
+    {% endif %}
+
+    <!-- ── Header Fields ─────────────────────────────────────────── -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold bg-dark text-white">Bill Details</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-3">
+            <label class="form-label">Bill No.</label>
+            <input type="text" class="form-control" value="{{ next_bill_no }}" disabled>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Bill Date <span class="text-danger">*</span></label>
+            <input type="date" name="bill_date" class="form-control" value="{{ bill.bill_date if edit else today }}" required>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Delivery Month</label>
+            <div class="input-group">
+              <select name="delivery_month_select" class="form-select" id="deliveryMonthSelect">
+                <option value="">-- Month --</option>
+                {% for m in months %}
+                <option value="{{ m }}" {{ 'selected' if (bill and bill.delivery_month_select == m) else '' }}>{{ m }}</option>
+                {% endfor %}
+              </select>
+              <span class="input-group-text" id="deliveryYearSpan">/—</span>
+            </div>
+            <small class="text-muted">Year auto-fills from Bill Date.</small>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Trip Type</label>
+            <select name="trip_type" class="form-select">
+              <option value="One Way" {{ 'selected' if (bill and bill.trip_type == 'One Way') else '' }}>One Way</option>
+              <option value="Two Way" {{ 'selected' if (bill and bill.trip_type == 'Two Way') else '' }}>Two Way</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Vehicle No. <span class="text-danger">*</span></label>
+            <input type="text" name="vehicle_no" class="form-control" placeholder="Type or pick…"
+                   value="{{ bill.vehicle_no if bill else '' }}" required
+                   list="vehiclesList" autocomplete="off" style="text-transform:uppercase">
+            <datalist id="vehiclesList">
+              {% for v in vehicles %}<option value="{{ v }}">{% endfor %}
+            </datalist>
+            <small class="text-muted">Past vehicles auto-suggest.</small>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Freight Type <small class="text-muted">(fixed in Settings)</small></label>
+            <input type="text" class="form-control" value="{{ freight_type }}" disabled>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Client Name (for tax footer)</label>
+            <select name="client_name" class="form-select">
+              {% for c in clients %}
+              <option value="{{ c }}" {{ 'selected' if (bill and bill.client_name == c) or (not edit and c == client_name) else '' }}>{{ c }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Recipient ─────────────────────────────────────────────── -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold bg-dark text-white">Service Recipient</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label class="form-label">Name <span class="text-danger">*</span></label>
+            <input type="text" name="recipient_name" id="recipientNameInput" class="form-control"
+                   value="{{ bill.recipient_name if bill else '' }}" required
+                   list="recipientsList" autocomplete="off">
+            <datalist id="recipientsList">
+              {% for r in recipients %}<option value="{{ r.name }}">{% endfor %}
+            </datalist>
+            <small class="text-muted d-block">Picking a saved recipient auto-fills Address, GSTIN &amp; State Code.</small>
+            <small class="text-success fw-semibold d-block" id="freightRateHint"></small>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Address</label>
+            <input type="text" name="recipient_address" class="form-control"
+                   value="{{ bill.recipient_address if bill else '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">GSTIN No.</label>
+            <input type="text" name="recipient_gstin" class="form-control"
+                   value="{{ bill.recipient_gstin if bill else '' }}" style="text-transform:uppercase">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label">State Code</label>
+            <input type="text" name="state_code" class="form-control" placeholder="e.g. 09"
+                   value="{{ bill.state_code if bill else '' }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── GST / Tax ─────────────────────────────────────────────── -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold bg-dark text-white">
+        <i class="bi bi-receipt me-2"></i>GST / Tax
+      </div>
+      <div class="card-body">
+        <div class="row g-3 align-items-end">
+          <div class="col-md-3">
+            <label class="form-label">HSN / SAC code</label>
+            {% set _hsn = (bill.get('hsn_sac') if bill else '') or (default_hsn_sac or '996511') %}
+            <input type="text" name="hsn_sac" class="form-control"
+                   value="{{ _hsn }}" placeholder="996511">
+            <small class="text-muted">996511 = Goods transport by road</small>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Place of Supply</label>
+            {% set _pos = (bill.get('place_of_supply') if bill else '') or (bill.get('state_code') if bill else '') or '09' %}
+            <select name="place_of_supply" class="form-select">
+              {% for code, name in gst_states.items() %}
+                <option value="{{ code }}" {{ 'selected' if code == _pos }}>
+                  {{ code }} — {{ name }}
+                </option>
+              {% endfor %}
+            </select>
+            <small class="text-muted">Usually = recipient's state code</small>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">GST rate %</label>
+            {# Defensive: prefill dicts (from extraction/ledger) may not carry GST keys yet #}
+            {% set _gst_rate = ((bill.get('igst_pct') or (bill.get('cgst_pct') or 0) * 2) if bill else (default_gst_pct or 5)) %}
+            <input type="number" step="0.5" name="gst_pct" id="gstPct" class="form-control"
+                   value="{{ _gst_rate or (default_gst_pct or 5) }}">
+            <small class="text-muted">Ignored if reverse-charge is on</small>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label">Reverse charge</label>
+            <div class="form-check mt-2">
+              {% set _rcm = bill.get('reverse_charge') if bill else default_reverse_charge %}
+              <input type="checkbox" name="reverse_charge" id="rcmFlag" class="form-check-input"
+                     {{ 'checked' if (_rcm if _rcm is not none else default_reverse_charge) }}>
+              <label class="form-check-label small" for="rcmFlag">
+                Recipient pays GST under RCM
+              </label>
+            </div>
+            <small class="text-muted">Standard for GTA road transport</small>
+          </div>
+        </div>
+
+        {# Live tax preview — populated by JS #}
+        <div class="row g-2 mt-3 small" id="taxPreview" style="background:#f4f5f9; border-radius:8px; padding:10px">
+          <div class="col-md-3"><strong>Taxable value:</strong> <span id="tpTaxable">—</span></div>
+          <div class="col-md-3"><span id="tpTaxBreakdown">RCM — no tax charged</span></div>
+          <div class="col-md-3"><strong>Tax:</strong> <span id="tpTax">₹0</span></div>
+          <div class="col-md-3"><strong>Grand total:</strong> <span id="tpGrandTotal">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Deliveries ────────────────────────────────────────────── -->
+    <div class="card mb-3">
+      <div class="card-header fw-semibold bg-dark text-white d-flex justify-content-between align-items-center">
+        <span>Deliveries</span>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-sm btn-success" onclick="addDelivery()" id="addBtn">
+            <i class="bi bi-plus"></i> Add Row
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeDelivery()" id="removeBtn">
+            <i class="bi bi-dash"></i> Remove Last
+          </button>
+        </div>
+      </div>
+      <div class="card-body p-2 overflow-auto">
+        <table class="table table-bordered table-sm delivery-form-table" id="deliveryTable">
+          <thead class="table-secondary text-center" style="font-size:11px">
+            <tr>
+              <th>SR</th>
+              <th>GR No.</th>
+              <th>Outward Del. No.</th>
+              <th>Outward Date</th>
+              <th>Inward Del. No.</th>
+              <th>Inward Date</th>
+              <th>Location / Route</th>
+              <th>Consignee Name</th>
+              <th>Del. Qty</th>
+              <th>Conv. Case</th>
+              <th>Inward Qty</th>
+              <th>Empty Qty</th>
+              <th>Weight (kg)</th>
+              <th>Freight Rate</th>
+              <th>Overload</th>
+              <th>Toll Tax</th>
+              <th>Excess KM</th>
+              <th>Detention</th>
+              <th>Unloading</th>
+              <th>Value of Supply</th>
+            </tr>
+          </thead>
+          <tbody id="deliveryBody">
+            {% if bill and bill.deliveries %}
+              {% for d in bill.deliveries %}
+              {{ delivery_row(loop.index0, d) }}
+              {% endfor %}
+            {% else %}
+              {{ delivery_row(0, {}) }}
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+      <div class="card-footer text-end fw-bold">
+        TOTAL AMOUNT: ₹ <span id="grand_total">
+          {% if edit and bill %}{{ '{:,.2f}'.format(bill.total_amount or 0) }}{% else %}0.00{% endif %}
+        </span>
+      </div>
+    </div>
+
+    <div class="d-flex gap-2">
+      <button type="submit" class="btn btn-primary">
+        <i class="bi bi-save me-1"></i>{{ t('Update Bill') if edit else t('Save & View Bill') }}
+      </button>
+      <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<!-- Delivery row template (hidden) -->
+<template id="deliveryRowTpl">
+  __ROW__
+</template>
+{% endblock %}
+
+{% macro delivery_row(i, d) %}
+<tr data-idx="{{ i }}">
+  <td class="text-center align-middle" style="min-width:30px">{{ i+1 }}</td>
+  <td><input type="text" name="d_gr_no_{{ i }}" class="form-control form-control-sm" value="{{ d.gr_no or '' }}"></td>
+  <td><input type="text" name="d_outward_no_{{ i }}" class="form-control form-control-sm" value="{{ d.outward_no or '' }}"></td>
+  <td><input type="date" name="d_outward_date_{{ i }}" class="form-control form-control-sm" value="{{ d.outward_date or '' }}"></td>
+  <td><input type="text" name="d_inward_no_{{ i }}" class="form-control form-control-sm" value="{{ d.inward_no or '' }}"></td>
+  <td><input type="date" name="d_inward_date_{{ i }}" class="form-control form-control-sm" value="{{ d.inward_date or '' }}"></td>
+  <td><input type="text" name="d_location_{{ i }}" class="form-control form-control-sm" value="{{ d.location or '' }}"></td>
+  <td><input type="text" name="d_consignee_{{ i }}" class="form-control form-control-sm" value="{{ d.consignee or '' }}"></td>
+  <td><input type="number" name="d_delivery_qty_{{ i }}" class="form-control form-control-sm num" step="any" value="{{ d.delivery_qty or '' }}"></td>
+  <td><input type="number" name="d_converted_case_{{ i }}" class="form-control form-control-sm num" step="any" value="{{ d.converted_case or '' }}"></td>
+  <td><input type="number" name="d_inward_qty_{{ i }}" class="form-control form-control-sm num" step="any" value="{{ d.inward_qty or '' }}"></td>
+  <td><input type="number" name="d_empty_qty_{{ i }}" class="form-control form-control-sm num" step="any" value="{{ d.empty_qty or '' }}"></td>
+  <td><input type="number" name="d_weight_{{ i }}" class="form-control form-control-sm num" step="any" value="{{ d.weight or '' }}"></td>
+  <td><input type="number" name="d_freight_rate_{{ i }}" class="form-control form-control-sm calc-field" step="any" data-row="{{ i }}" value="{{ d.freight_rate or '' }}"></td>
+  <td><input type="number" name="d_overload_{{ i }}" class="form-control form-control-sm calc-field" step="any" data-row="{{ i }}" value="{{ d.overload or '' }}"></td>
+  <td><input type="number" name="d_toll_tax_{{ i }}" class="form-control form-control-sm calc-field" step="any" data-row="{{ i }}" value="{{ d.toll_tax or '' }}"></td>
+  <td><input type="number" name="d_excess_km_{{ i }}" class="form-control form-control-sm calc-field" step="any" data-row="{{ i }}" value="{{ d.excess_km or '' }}"></td>
+  <td><input type="number" name="d_detention_{{ i }}" class="form-control form-control-sm calc-field" step="any" data-row="{{ i }}" value="{{ d.detention or '' }}"></td>
+  <td><input type="number" name="d_unloading_{{ i }}" class="form-control form-control-sm calc-field" step="any" data-row="{{ i }}" value="{{ d.unloading or '' }}"></td>
+  <td><input type="number" name="d_value_of_supply_{{ i }}" id="vos_{{ i }}" class="form-control form-control-sm fw-bold" step="any" value="{{ d.value_of_supply or '' }}"></td>
+</tr>
+{% endmacro %}
+
+{% block scripts %}
+<script>
+let deliveryCount = {{ bill.deliveries|length if (bill and bill.deliveries) else 1 }};
+const MAX = 5;
+
+function buildRow(idx) {
+  return `<tr data-idx="${idx}">
+    <td class="text-center align-middle">${idx+1}</td>
+    <td><input type="text"   name="d_gr_no_${idx}"          class="form-control form-control-sm"></td>
+    <td><input type="text"   name="d_outward_no_${idx}"      class="form-control form-control-sm"></td>
+    <td><input type="date"   name="d_outward_date_${idx}"    class="form-control form-control-sm"></td>
+    <td><input type="text"   name="d_inward_no_${idx}"       class="form-control form-control-sm"></td>
+    <td><input type="date"   name="d_inward_date_${idx}"     class="form-control form-control-sm"></td>
+    <td><input type="text"   name="d_location_${idx}"        class="form-control form-control-sm"></td>
+    <td><input type="text"   name="d_consignee_${idx}"       class="form-control form-control-sm"></td>
+    <td><input type="number" name="d_delivery_qty_${idx}"    class="form-control form-control-sm" step="any"></td>
+    <td><input type="number" name="d_converted_case_${idx}"  class="form-control form-control-sm" step="any"></td>
+    <td><input type="number" name="d_inward_qty_${idx}"      class="form-control form-control-sm" step="any"></td>
+    <td><input type="number" name="d_empty_qty_${idx}"       class="form-control form-control-sm" step="any"></td>
+    <td><input type="number" name="d_weight_${idx}"          class="form-control form-control-sm" step="any"></td>
+    <td><input type="number" name="d_freight_rate_${idx}"    class="form-control form-control-sm calc-field" step="any" data-row="${idx}"></td>
+    <td><input type="number" name="d_overload_${idx}"        class="form-control form-control-sm calc-field" step="any" data-row="${idx}"></td>
+    <td><input type="number" name="d_toll_tax_${idx}"        class="form-control form-control-sm calc-field" step="any" data-row="${idx}"></td>
+    <td><input type="number" name="d_excess_km_${idx}"       class="form-control form-control-sm calc-field" step="any" data-row="${idx}"></td>
+    <td><input type="number" name="d_detention_${idx}"       class="form-control form-control-sm calc-field" step="any" data-row="${idx}"></td>
+    <td><input type="number" name="d_unloading_${idx}"       class="form-control form-control-sm calc-field" step="any" data-row="${idx}"></td>
+    <td><input type="number" name="d_value_of_supply_${idx}" id="vos_${idx}" class="form-control form-control-sm fw-bold" step="any"></td>
+  </tr>`;
+}
+
+function addDelivery() {
+  if (deliveryCount >= MAX) { alert('Maximum 5 delivery rows allowed.'); return; }
+  document.getElementById('deliveryBody').insertAdjacentHTML('beforeend', buildRow(deliveryCount));
+  deliveryCount++;
+  document.getElementById('delivery_count').value = deliveryCount;
+  attachCalcListeners();
+  updateButtons();
+}
+
+function removeDelivery() {
+  if (deliveryCount <= 1) return;
+  const body = document.getElementById('deliveryBody');
+  body.removeChild(body.lastElementChild);
+  deliveryCount--;
+  document.getElementById('delivery_count').value = deliveryCount;
+  recalcTripOverload();    // total weight changed → recompute
+  calcGrandTotal();
+  updateButtons();
+}
+
+function updateButtons() {
+  document.getElementById('addBtn').disabled    = deliveryCount >= MAX;
+  document.getElementById('removeBtn').disabled = deliveryCount <= 1;
+}
+
+function calcRowVOS(rowIdx) {
+  const fields = ['freight_rate','overload','toll_tax','excess_km','detention','unloading'];
+  let sum = 0;
+  fields.forEach(f => {
+    const el = document.querySelector(`[name="d_${f}_${rowIdx}"]`);
+    sum += parseFloat(el?.value || 0) || 0;
+  });
+  const vos = document.getElementById(`vos_${rowIdx}`);
+  // Round to whole rupees — Indian bills never carry paise on freight invoices.
+  if (vos) vos.value = sum > 0 ? Math.round(sum) : '';
+  calcGrandTotal();
+}
+
+const SUPPLIER_STATE = {{ supplier.state_code | tojson }};
+
+function fmtINR(n) {
+  return '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+}
+
+function calcGrandTotal() {
+  let taxable = 0;
+  document.querySelectorAll('[id^="vos_"]').forEach(el => {
+    taxable += parseFloat(el.value || 0) || 0;
+  });
+
+  // GST split based on RCM + state
+  const rcm = document.getElementById('rcmFlag')?.checked;
+  const gstPct = parseFloat(document.getElementById('gstPct')?.value || 0) || 0;
+  const pos = document.querySelector('select[name="place_of_supply"]')?.value || '';
+  const sameState = SUPPLIER_STATE && pos && SUPPLIER_STATE === pos;
+
+  let tax = 0;
+  let breakdownTxt = 'RCM — recipient pays GST';
+  if (!rcm && gstPct > 0) {
+    if (sameState) {
+      const half = Math.round(taxable * gstPct / 200);   // CGST or SGST = half of total tax
+      tax = half * 2;
+      breakdownTxt = `CGST ${gstPct/2}% ${fmtINR(half)} + SGST ${gstPct/2}% ${fmtINR(half)}`;
+    } else {
+      tax = Math.round(taxable * gstPct / 100);
+      breakdownTxt = `IGST ${gstPct}% ${fmtINR(tax)}`;
+    }
+  }
+
+  const grand = Math.round(taxable + tax);
+  document.getElementById('grand_total').textContent = grand.toLocaleString('en-IN');
+
+  // Live tax-preview panel
+  const tp = (id) => document.getElementById(id);
+  if (tp('tpTaxable'))      tp('tpTaxable').textContent      = fmtINR(taxable);
+  if (tp('tpTaxBreakdown')) tp('tpTaxBreakdown').textContent = breakdownTxt;
+  if (tp('tpTax'))          tp('tpTax').textContent          = fmtINR(tax);
+  if (tp('tpGrandTotal'))   tp('tpGrandTotal').textContent   = fmtINR(grand);
+}
+
+function attachCalcListeners() {
+  document.querySelectorAll('.calc-field').forEach(el => {
+    el.removeEventListener('input', el._calcHandler);
+    el._calcHandler = () => calcRowVOS(parseInt(el.dataset.row));
+    el.addEventListener('input', el._calcHandler);
+  });
+  // VOS direct edit → update grand total only
+  document.querySelectorAll('[id^="vos_"]').forEach(el => {
+    el.removeEventListener('input', el._totalHandler);
+    el._totalHandler = calcGrandTotal;
+    el.addEventListener('input', el._totalHandler);
+  });
+  // Weight inputs → re-run rate lookup (LP↔Trolla flips at 15000 kg) AND overload
+  document.querySelectorAll('input[name^="d_weight_"]').forEach(el => {
+    el.removeEventListener('input', el._weightHandler);
+    el._weightHandler = applyRecipientTemplate;   // does both rate pick + overload calc
+    el.addEventListener('input', el._weightHandler);
+  });
+  // Freight rate row 0 → also re-run trip-level overload (manual override case)
+  const fr0 = document.querySelector('input[name="d_freight_rate_0"]');
+  if (fr0) {
+    fr0.removeEventListener('input', fr0._tripHandler);
+    fr0._tripHandler = recalcTripOverload;
+    fr0.addEventListener('input', fr0._tripHandler);
+  }
+}
+
+// ── Trip-level overload calculation ───────────────────────────
+//   per_kg_rate = base_rate / base_weight
+//   total_charge = per_kg_rate × total_weight (sum of all rows)
+//   overload = max(0, total_charge − base_rate)
+//   Base weight: 9000 kg for LP, 15000 kg for Trolla.
+//   Base rate is read from row-0 Freight Rate field.
+//   Result: row-0 Overload column. Other rows' Overload is cleared.
+function recalcTripOverload() {
+  const fr0 = document.querySelector('input[name="d_freight_rate_0"]');
+  if (!fr0) return;
+  const baseRate = parseFloat(fr0.value) || 0;
+
+  const totalWeight = sumTotalWeight();
+  const baseWeight  = baseWeightFor(detectTruckClass(totalWeight));
+
+  let overload = 0;
+  if (baseRate > 0 && totalWeight > 0) {
+    const totalCharge = (baseRate / baseWeight) * totalWeight;
+    overload = Math.max(0, totalCharge - baseRate);
+  }
+
+  const ov0 = document.querySelector('input[name="d_overload_0"]');
+  if (ov0) {
+    ov0.value = overload > 0.005 ? overload.toFixed(2) : '';
+    ov0.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  // Clear overload on other rows — only row 0 carries the trip overload
+  document.querySelectorAll('input[name^="d_overload_"]').forEach(el => {
+    if (el.name !== 'd_overload_0' && el.value) {
+      el.value = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+}
+
+// ── Recipient template auto-fill ───────────────────────────────
+const RECIPIENTS = {{ recipients | tojson }};
+const RATE_LIST  = {{ rate_list  | tojson }};
+const VEHICLE_TYPE = {{ vehicle_type | tojson }};   // e.g. "LP" or "Trolla" or "A1/A4"
+
+const recipientByName = {};
+RECIPIENTS.forEach(r => recipientByName[r.name.toLowerCase().trim()] = r);
+
+// Rate list is keyed by *consignee* name (the destination party), not by the
+// recipient/consignor on the bill. One consignee can have rate cards for
+// multiple locations, so values are arrays.
+const rateByConsignee = {};
+RATE_LIST.forEach(r => {
+  const key = (r.customer_name || '').toLowerCase().trim();
+  if (!key) return;
+  if (!rateByConsignee[key]) rateByConsignee[key] = [];
+  rateByConsignee[key].push(r);
+});
+
+// Find a rate card by consignee name (fuzzy: exact → starts-with → contains).
+// If multiple cards exist for the same consignee, prefer one whose location
+// matches the row's Location/Route field.
+function findRateCard(consigneeRaw, locationRaw) {
+  const consignee = (consigneeRaw || '').toLowerCase().trim();
+  if (!consignee) return null;
+
+  let cards = rateByConsignee[consignee];
+  if (!cards) {
+    const keys = Object.keys(rateByConsignee);
+    // starts-with either direction
+    let match = keys.find(k => k.startsWith(consignee) || consignee.startsWith(k));
+    // contains either direction
+    if (!match) match = keys.find(k => k.includes(consignee) || consignee.includes(k));
+    if (match) cards = rateByConsignee[match];
+  }
+  if (!cards || cards.length === 0) return null;
+
+  if (cards.length === 1) return cards[0];
+
+  // Multiple locations for this consignee — narrow by location field
+  const loc = (locationRaw || '').toLowerCase().trim();
+  if (loc) {
+    const exact = cards.find(c => (c.location || '').toLowerCase().trim() === loc);
+    if (exact) return exact;
+    const fuzzy = cards.find(c => {
+      const cl = (c.location || '').toLowerCase().trim();
+      return cl && (cl.includes(loc) || loc.includes(cl));
+    });
+    if (fuzzy) return fuzzy;
+  }
+  return cards[0];   // first as fallback
+}
+
+// Sum the weight column across all delivery rows
+function sumTotalWeight() {
+  let total = 0;
+  document.querySelectorAll('input[name^="d_weight_"]').forEach(el => {
+    total += parseFloat(el.value) || 0;
+  });
+  return total;
+}
+
+// Decide which truck class applies based purely on total weight
+//   ≥ 15000 kg → Trolla (base 15000)
+//   <  15000 kg → LP    (base 9000), even if overloaded above 9000
+function detectTruckClass(totalWeight) {
+  return totalWeight >= 15000 ? 'Trolla' : 'LP';
+}
+
+function baseWeightFor(truckClass) {
+  return truckClass === 'Trolla' ? 15000 : 9000;
+}
+
+// Pick the right rate column from the rate card based on weight + trip type
+function pickRateFromCard(card, tripType, totalWeight) {
+  if (!card) return null;
+  const truckClass = detectTruckClass(totalWeight);
+  const isOneWay = /one\s*way/i.test(tripType || '');
+  if (truckClass === 'Trolla') return isOneWay ? card.trolla_owy : card.trolla_twy;
+  return                              isOneWay ? card.lp_owy        : card.lp_twy;
+}
+
+// Apply a rate card to a single delivery row based on its consignee + location.
+// Returns the applied rate (or null) so callers can update the hint.
+function applyRateForRow(idx) {
+  const consigneeInput = document.querySelector(`input[name="d_consignee_${idx}"]`);
+  const locationInput  = document.querySelector(`input[name="d_location_${idx}"]`);
+  const rateInput      = document.querySelector(`input[name="d_freight_rate_${idx}"]`);
+  if (!consigneeInput || !rateInput) return { rate: null, card: null };
+
+  const consigneeName = (consigneeInput.value || '').trim();
+  const location      = (locationInput?.value || '').trim();
+  const card          = findRateCard(consigneeName, location);
+  const tripType      = document.querySelector('select[name="trip_type"]')?.value || 'One Way';
+  const totalWeight   = sumTotalWeight();
+  const rate          = pickRateFromCard(card, tripType, totalWeight);
+
+  if (rate) {
+    const cur = parseFloat(rateInput.value) || 0;
+    // Allow auto-update only if the field is empty or its value matches one of
+    // the 4 rate columns for this consignee (i.e., was previously auto-filled).
+    const candidates = card
+      ? [card.lp_owy, card.lp_twy, card.trolla_owy, card.trolla_twy].filter(Boolean)
+      : [];
+    const wasAutoFilled = !rateInput.value || candidates.some(v => Math.abs(v - cur) < 0.01);
+    if (wasAutoFilled && Math.abs(cur - rate) > 0.01) {
+      rateInput.value = rate;
+      rateInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+  return { rate, card, tripType, totalWeight, consigneeName };
+}
+
+// Update the hint shown under the recipient panel — based on the FIRST delivery row.
+function updateRateHint() {
+  const hint = document.getElementById('freightRateHint');
+  if (!hint) return;
+  const { rate, card, tripType, totalWeight, consigneeName } = applyRateForRow(0);
+
+  if (rate && card) {
+    const truckClass = detectTruckClass(totalWeight);
+    const direction  = /one\s*way/i.test(tripType) ? 'OWY' : 'TWY';
+    hint.innerHTML =
+      `Freight rate: <strong>₹${Number(rate).toFixed(2)}</strong> ` +
+      `(rate list • ${truckClass}-${direction} • ${card.customer_name} → ${card.location || '—'}) ` +
+      `— change if revised.`;
+    hint.classList.remove('text-success', 'text-danger');
+    hint.classList.add('text-info');
+  } else if (consigneeName && RATE_LIST.length) {
+    hint.textContent = `No rate found for consignee "${consigneeName}" in the rate list.`;
+    hint.classList.remove('text-info', 'text-success');
+    hint.classList.add('text-danger');
+  } else {
+    // Fall back to last-billed rate from the bill recipient if known
+    const recName = (document.getElementById('recipientNameInput')?.value || '').toLowerCase().trim();
+    const r = recipientByName[recName];
+    if (r && r.freight_rate) {
+      const rateInput = document.querySelector('input[name="d_freight_rate_0"]');
+      if (rateInput && !rateInput.value) {
+        rateInput.value = r.freight_rate;
+        rateInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      hint.textContent = `Freight rate ₹${Number(r.freight_rate).toFixed(2)} (last bill for this recipient) — change if revised.`;
+      hint.classList.remove('text-danger', 'text-success');
+      hint.classList.add('text-info');
+    } else {
+      hint.textContent = '';
+    }
+  }
+}
+
+function applyRecipientTemplate() {
+  // Recipient lookup → fills address/GSTIN/state from the recipients table.
+  // (The freight rate is NOT looked up by recipient — it's per consignee per row.)
+  const recName = (document.getElementById('recipientNameInput').value || '').toLowerCase().trim();
+  const r = recipientByName[recName];
+  if (r) {
+    document.querySelector('input[name="recipient_address"]').value = r.address || '';
+    document.querySelector('input[name="recipient_gstin"]').value   = r.gstin   || '';
+    document.querySelector('input[name="state_code"]').value        = r.state_code || '';
+  }
+  // Rate auto-fill is driven by consignee, not recipient. Run for every row
+  // (a multi-consignee bill can have different rates per row).
+  document.querySelectorAll('input[name^="d_consignee_"]').forEach(inp => {
+    const m = inp.name.match(/^d_consignee_(\d+)$/);
+    if (m) applyRateForRow(parseInt(m[1], 10));
+  });
+  updateRateHint();
+  recalcTripOverload();
+}
+
+// ── Delivery year preview from bill_date ───────────────────────
+function updateDeliveryYear() {
+  const bd = document.querySelector('input[name="bill_date"]')?.value || '';
+  const yr = bd.length >= 4 ? bd.substring(2, 4) : '';
+  const span = document.getElementById('deliveryYearSpan');
+  if (span) span.textContent = yr ? '/' + yr : '/—';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  attachCalcListeners();
+  calcGrandTotal();
+  updateButtons();
+
+  // GST fields trigger live recompute
+  ['rcmFlag', 'gstPct'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', calcGrandTotal);
+    if (el) el.addEventListener('input',  calcGrandTotal);
+  });
+  document.querySelector('select[name="place_of_supply"]')?.addEventListener('change', calcGrandTotal);
+
+  const recInput = document.getElementById('recipientNameInput');
+  if (recInput) {
+    recInput.addEventListener('change', applyRecipientTemplate);
+    recInput.addEventListener('input',  () => {
+      // datalist option click triggers input → check exact match
+      if (recipientByName[(recInput.value || '').toLowerCase().trim()]) applyRecipientTemplate();
+    });
+  }
+
+  const billDate = document.querySelector('input[name="bill_date"]');
+  if (billDate) billDate.addEventListener('input', updateDeliveryYear);
+  updateDeliveryYear();
+
+  // Re-run rate lookup when trip type changes (One Way ↔ Two Way uses different rate columns)
+  const tripSelect = document.querySelector('select[name="trip_type"]');
+  if (tripSelect) tripSelect.addEventListener('change', applyRecipientTemplate);
+
+  // ── Per-row consignee + location inputs drive the rate lookup ──
+  // Listen on the deliveries table; this catches both initial rows and any
+  // dynamically-added "Add Row" rows (event delegation, no need to re-attach).
+  const deliveriesTable = document.querySelector('#deliveriesTable, table.deliveries-table, table');
+  // Use document-level delegation as a safe fallback so it works regardless of table id
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || !t.name) return;
+    const cm = t.name.match(/^d_consignee_(\d+)$/);
+    const lm = t.name.match(/^d_location_(\d+)$/);
+    if (cm || lm) {
+      const idx = parseInt((cm || lm)[1], 10);
+      applyRateForRow(idx);
+      if (idx === 0) updateRateHint();
+    }
+  });
+  // Also listen on input so the hint updates while typing the consignee
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t || !t.name) return;
+    if (/^d_consignee_(\d+)$/.test(t.name) || /^d_location_(\d+)$/.test(t.name)) {
+      const idx = parseInt(t.name.match(/_(\d+)$/)[1], 10);
+      applyRateForRow(idx);
+      if (idx === 0) updateRateHint();
+    }
+  });
+
+  // If the form is already pre-filled (edit mode or VBL extraction prefill),
+  // run the lookup once on load so the rate hint + auto-fill kick in.
+  if (recInput && (recInput.value || '').trim()) {
+    applyRecipientTemplate();
+  } else {
+    // Even without a recipient, if a consignee is pre-filled (e.g. from
+    // extraction), run the per-row rate lookup so the hint shows up.
+    document.querySelectorAll('input[name^="d_consignee_"]').forEach(inp => {
+      if ((inp.value || '').trim()) {
+        const m = inp.name.match(/^d_consignee_(\d+)$/);
+        if (m) applyRateForRow(parseInt(m[1], 10));
+      }
+    });
+    updateRateHint();
+  }
+});
+</script>
+{% endblock %}

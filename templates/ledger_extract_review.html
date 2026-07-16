@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Review Ledger Extraction — Munshi{% endblock %}
+{% block content %}
+{% set parsed = extraction.parsed or {} %}
+{% set rows = parsed.get('rows') or [] %}
+
+<div class="container-fluid px-3 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">
+      <i class="bi bi-clipboard-check me-1"></i>
+      Review Ledger Page — {{ rows|length }} row{{ '' if rows|length == 1 else 's' }} extracted
+    </h5>
+    <a href="{{ url_for('ledger_extract_upload') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left"></i> Upload again
+    </a>
+  </div>
+
+  <div class="alert alert-warning small d-flex align-items-center">
+    <i class="bi bi-magic me-2 fs-4"></i>
+    <div class="flex-grow-1">
+      <strong>AI pre-filled these rows from the uploaded photo.</strong>
+      Verify each row carefully (handwriting accuracy is ~85–90%). Untick any row you don't want
+      to save. Then click "Save Selected".
+    </div>
+  </div>
+
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="row_count" value="{{ rows|length }}">
+
+    <div class="row g-3">
+      <!-- LEFT: image (sticky) -->
+      <div class="col-lg-4">
+        <div style="position:sticky; top:1rem;">
+          {% if extraction.source_image %}
+            {% if extraction.source_image.lower().endswith('.pdf') %}
+              <embed src="{{ url_for('serve_upload', filename=extraction.source_image) }}"
+                     type="application/pdf" style="width:100%; height:80vh; border:1px solid #ccc;">
+            {% else %}
+              <a href="{{ url_for('serve_upload', filename=extraction.source_image) }}" target="_blank">
+                <img src="{{ url_for('serve_upload', filename=extraction.source_image) }}"
+                     class="img-fluid border rounded" style="max-height:80vh; cursor:zoom-in">
+              </a>
+            {% endif %}
+          {% endif %}
+          <div class="mt-2">
+            <label class="form-label small fw-semibold">Page Date</label>
+            <input type="date" name="page_date" class="form-control form-control-sm"
+                   value="{{ parsed.get('page_date') or '' }}">
+            <small class="text-muted">Applied to all saved rows as their entry date.</small>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: editable rows -->
+      <div class="col-lg-8">
+        {% if rows %}
+          <div class="d-flex justify-content-between mb-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAll(true)">
+              <i class="bi bi-check2-all"></i> Tick all
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAll(false)">
+              <i class="bi bi-x"></i> Untick all
+            </button>
+          </div>
+
+          {% for r in rows %}
+          {% set conf = r.get('confidence') %}
+          <div class="card mb-2 {% if conf == 'low' %}border-warning{% endif %}">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+              <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input row-check" type="checkbox"
+                       name="r_{{ loop.index0 }}_include" id="rc_{{ loop.index0 }}"
+                       value="1" checked>
+                <label class="form-check-label fw-semibold" for="rc_{{ loop.index0 }}">
+                  Row {{ loop.index }} — GR {{ r.gr_no or '?' }}
+                </label>
+              </div>
+              {% if conf == 'low' %}
+                <span class="badge bg-warning text-dark">low confidence</span>
+              {% elif conf == 'medium' %}
+                <span class="badge bg-warning-subtle text-dark border">verify</span>
+              {% endif %}
+            </div>
+            <div class="card-body py-2">
+              <div class="row g-2 small">
+                <div class="col-md-2">
+                  <label class="form-label tiny">GR No.</label>
+                  <input type="text" name="r_{{ loop.index0 }}_gr_no" class="form-control form-control-sm"
+                         value="{{ r.gr_no or '' }}">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label tiny">Vehicle</label>
+                  <input type="text" name="r_{{ loop.index0 }}_vehicle_no" class="form-control form-control-sm"
+                         value="{{ r.vehicle_no or '' }}" style="text-transform:uppercase">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label tiny">Station</label>
+                  <input type="text" name="r_{{ loop.index0 }}_station" class="form-control form-control-sm"
+                         value="{{ r.station or '' }}">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label tiny">Trip</label>
+                  <select name="r_{{ loop.index0 }}_trip_type" class="form-select form-select-sm">
+                    <option {{ 'selected' if r.trip_type == 'One Way' or not r.trip_type }}>One Way</option>
+                    <option {{ 'selected' if r.trip_type == 'Two Way' }}>Two Way</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label tiny">MT</label>
+                  <input type="number" step="any" name="r_{{ loop.index0 }}_mt_qty"
+                         class="form-control form-control-sm"
+                         value="{{ r.mt_qty if r.mt_qty is not none else '' }}">
+                </div>
+
+                <div class="col-md-3">
+                  <label class="form-label tiny">Shipment / Inv. No.</label>
+                  <input type="text" name="r_{{ loop.index0 }}_shipment_no" class="form-control form-control-sm"
+                         value="{{ r.shipment_no or '' }}">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label tiny">Consignee (note)</label>
+                  <input type="text" name="r_{{ loop.index0 }}_consignee_note" class="form-control form-control-sm"
+                         value="{{ r.consignee_name or '' }}" disabled
+                         title="Stored as remark prefix below">
+                </div>
+
+                <div class="col-md-2">
+                  <label class="form-label tiny">Freight</label>
+                  <input type="number" step="any" name="r_{{ loop.index0 }}_freight"
+                         class="form-control form-control-sm money-{{ loop.index0 }}"
+                         value="{{ r.freight if r.freight is not none else '' }}"
+                         oninput="recalcRow({{ loop.index0 }})">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label tiny">Adv. Cash</label>
+                  <input type="number" step="any" name="r_{{ loop.index0 }}_advance_cash"
+                         class="form-control form-control-sm money-{{ loop.index0 }}"
+                         value="{{ r.advance_cash if r.advance_cash is not none else '' }}"
+                         oninput="recalcRow({{ loop.index0 }})">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label tiny">Adv. A/c</label>
+                  <input type="number" step="any" name="r_{{ loop.index0 }}_advance_account"
+                         class="form-control form-control-sm money-{{ loop.index0 }}"
+                         value="{{ r.advance_account if r.advance_account is not none else '' }}"
+                         oninput="recalcRow({{ loop.index0 }})">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label tiny">Diesel</label>
+                  <input type="number" step="any" name="r_{{ loop.index0 }}_diesel"
+                         class="form-control form-control-sm money-{{ loop.index0 }}"
+                         value="{{ r.diesel if r.diesel is not none else '' }}"
+                         oninput="recalcRow({{ loop.index0 }})">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label tiny fw-bold">Balance</label>
+                  <input type="text" id="bal_{{ loop.index0 }}" class="form-control form-control-sm fw-bold bg-light" readonly>
+                </div>
+
+                <div class="col-md-4">
+                  <label class="form-label tiny">Remarks (auto-fills consignee + remark + signature)</label>
+                  <input type="text" name="r_{{ loop.index0 }}_remarks" class="form-control form-control-sm"
+                         value="{{ (r.consignee_name or '') + (' / ' + r.remark if r.remark else '') + (' / ' + r.signature if r.signature else '') }}">
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+
+          <div class="d-flex justify-content-end mt-3 sticky-bottom bg-white py-3 border-top">
+            <a href="{{ url_for('ledger_extract_upload') }}" class="btn btn-outline-secondary me-2">Discard</a>
+            <button type="submit" class="btn btn-success">
+              <i class="bi bi-check2-circle me-1"></i>Save Selected to Ledger
+            </button>
+          </div>
+        {% else %}
+          <div class="alert alert-warning">
+            No rows extracted from this image. Try a clearer photo.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </form>
+</div>
+
+<style>.tiny { font-size: 11px; margin-bottom: 0.1rem; }</style>
+<script>
+function recalcRow(idx) {
+  const num = sel => {
+    const el = document.querySelector(`[name="r_${idx}_${sel}"]`);
+    return parseFloat(el?.value || 0) || 0;
+  };
+  const bal = num('freight') - num('advance_cash') - num('advance_account') - num('diesel');
+  const out = document.getElementById(`bal_${idx}`);
+  if (out) out.value = bal.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function toggleAll(state) {
+  document.querySelectorAll('.row-check').forEach(c => { c.checked = state; });
+}
+document.addEventListener('DOMContentLoaded', () => {
+  for (let i = 0; i < {{ rows|length }}; i++) recalcRow(i);
+});
+</script>
+{% endblock %}

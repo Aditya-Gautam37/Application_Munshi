@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}Review Extraction #{{ extraction.id }} — Munshi{% endblock %}
+{% block content %}
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">
+      <i class="bi bi-clipboard-check me-1"></i>
+      Review &amp; Confirm — {{ invoices|length }} invoice{{ '' if invoices|length == 1 else 's' }}
+    </h5>
+    <div class="d-flex gap-2">
+      <a href="{{ url_for('extract_upload') }}" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left"></i> Upload again
+      </a>
+    </div>
+  </div>
+
+  <p class="small text-muted">
+    Check every field against the photo on the left. Yellow-highlighted fields are AI's
+    low-confidence reads — verify those especially.
+  </p>
+
+  <form method="post" id="reviewForm">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+    <!-- Combine vs Split toggle -->
+    {% if invoices|length > 1 %}
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="row align-items-center">
+          <div class="col-md-9">
+            <strong>Multiple invoices for this challan.</strong> Make this:
+          </div>
+          <div class="col-md-3">
+            <select name="mode" class="form-select form-select-sm">
+              <option value="combine" selected>One bill row (combined weight + qty)</option>
+              <option value="split">{{ invoices|length }} separate bill rows</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <input type="hidden" name="mode" value="combine">
+    {% endif %}
+
+    <!-- Invoice cards -->
+    {% for inv in invoices %}
+    {% set p = inv.parsed %}
+    {% set conf = p.confidence_per_field or {} %}
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white d-flex justify-content-between">
+        <span><i class="bi bi-file-earmark-image me-1"></i>Invoice #{{ inv.seq }}
+          {% if p.doc_no %}— Doc {{ p.doc_no }}{% endif %}</span>
+        {% if inv.error %}
+          <span class="badge bg-danger">extraction error</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+
+        {% if inv.error %}
+          <div class="alert alert-danger">
+            <strong>Extraction failed:</strong> {{ inv.error }}<br>
+            You can still type values manually below.
+          </div>
+        {% endif %}
+
+        <div class="row g-3">
+          <!-- LEFT: image preview -->
+          <div class="col-lg-5">
+            {% set ext = inv.file_name.lower() %}
+            {% if ext.endswith('.pdf') %}
+              <embed src="{{ url_for('serve_upload', filename=inv.file_name) }}" type="application/pdf"
+                     style="width:100%; height:560px; border:1px solid #ccc;">
+            {% else %}
+              <a href="{{ url_for('serve_upload', filename=inv.file_name) }}" target="_blank">
+                <img src="{{ url_for('serve_upload', filename=inv.file_name) }}"
+                     class="img-fluid border rounded" style="max-height:560px; cursor:zoom-in"
+                     alt="VBL #{{ inv.seq }}">
+              </a>
+              <div class="text-muted small mt-1 text-center">click to enlarge</div>
+            {% endif %}
+          </div>
+
+          <!-- RIGHT: editable fields -->
+          <div class="col-lg-7">
+            {% macro field(label, name, value, conf_level, ftype='text', help=None) %}
+              {% set cls = 'is-invalid-low' if conf_level == 'low' else ('is-warning-medium' if conf_level == 'medium' else '') %}
+              <div class="col-md-6">
+                <label class="form-label small fw-semibold">
+                  {{ label }}
+                  {% if conf_level == 'low' %}
+                    <span class="badge bg-warning text-dark ms-1" title="AI was unsure">verify</span>
+                  {% elif conf_level == 'medium' %}
+                    <span class="badge bg-warning-subtle text-dark border ms-1" title="AI partly read this">check</span>
+                  {% endif %}
+                </label>
+                <input type="{{ ftype }}" name="inv_{{ inv.id }}_{{ name }}"
+                       class="form-control form-control-sm {{ cls }}"
+                       value="{{ value or '' }}" {% if ftype == 'number' %}step="any"{% endif %}>
+                {% if help %}<small class="text-muted">{{ help }}</small>{% endif %}
+              </div>
+            {% endmacro %}
+
+            {# ── Consignor mismatch warning (different paying client than usual) ── #}
+            {% set extracted_consignor = (p.consignor_name or '').upper().strip() %}
+            {% set default_upper = (default_consignor or '').upper().strip() %}
+            {% if extracted_consignor and default_upper and extracted_consignor != default_upper %}
+              <div class="alert alert-warning small d-flex align-items-start mb-2">
+                <i class="bi bi-exclamation-triangle-fill me-2 fs-5"></i>
+                <div>
+                  <strong>Different consignor than usual.</strong><br>
+                  This VBL is from <strong>{{ p.consignor_name }}</strong> — your default client is
+                  <strong>{{ default_consignor }}</strong>.<br>
+                  <small class="text-muted">If this is a typo from the AI, fix the Consignor Name below.
+                  If it's a genuinely new paying client, leave it — your bill will be addressed to
+                  {{ p.consignor_name }} and a new client account will appear in Payments.</small>
+                </div>
+              </div>
+            {% endif %}
+
+            <div class="row g-2">
+              {{ field('Doc No.', 'doc_no', p.doc_no, conf.doc_no) }}
+              {{ field('Date', 'date', p.date, conf.date, 'date') }}
+              {{ field('Vehicle Reg No.', 'vehicle_reg_no', p.vehicle_reg_no, conf.vehicle_reg_no) }}
+              {{ field('Trip Type', 'trip_type', p.trip_type, conf.trip_type) }}
+              {{ field('Truck Capacity', 'truck_capacity', p.truck_capacity, conf.truck_capacity) }}
+              {{ field('Transporter', 'transporter', p.transporter, conf.transporter) }}
+
+              <div class="col-12"><hr class="my-1"></div>
+              <div class="col-12 small fw-bold text-muted">CONSIGNOR (your paying client) ↓</div>
+              {{ field('Consignor Name', 'consignor_name', p.consignor_name, conf.consignor_name) }}
+              {{ field('Consignor GSTIN', 'consignor_gstin', p.consignor_gstin, conf.consignor_gstin) }}
+              <div class="col-12">
+                <label class="form-label small fw-semibold">Consignor Address</label>
+                <input type="text" name="inv_{{ inv.id }}_consignor_address"
+                       class="form-control form-control-sm"
+                       value="{{ p.consignor_address or '' }}">
+              </div>
+
+              <div class="col-12"><hr class="my-1"></div>
+              <div class="col-12 small fw-bold text-muted">CONSIGNEE (delivery destination) ↓</div>
+              {{ field('Consignee Name', 'consignee_name', p.consignee_name, conf.consignee_name) }}
+              {{ field('Consignee Mobile', 'consignee_mobile', p.consignee_mobile, conf.consignee_mobile) }}
+              <div class="col-12">
+                <label class="form-label small fw-semibold">Consignee Address
+                  {% if conf.consignee_address == 'low' %}<span class="badge bg-warning text-dark ms-1">verify</span>{% endif %}
+                </label>
+                <input type="text" name="inv_{{ inv.id }}_consignee_address"
+                       class="form-control form-control-sm {% if conf.consignee_address == 'low' %}is-invalid-low{% endif %}"
+                       value="{{ p.consignee_address or '' }}">
+              </div>
+              {{ field('Consignee GSTIN', 'consignee_gstin', p.consignee_gstin, conf.consignee_gstin) }}
+
+              <div class="col-12"><hr class="my-1"></div>
+
+              {{ field('Total Weight (kg)', 'total_weight_kg', p.total_weight_kg, conf.total_weight_kg, 'number') }}
+              {{ field('Total Quantity', 'total_quantity', p.total_quantity, conf.total_quantity, 'number') }}
+              {{ field('Quantity Unit', 'quantity_unit', p.quantity_unit, conf.quantity_unit) }}
+            </div>
+
+            <!-- Line items (read-only summary, for sanity) -->
+            {% if p.line_items %}
+            <details class="mt-3">
+              <summary class="small text-muted">{{ p.line_items|length }} line item{{ '' if p.line_items|length == 1 else 's' }} extracted (click to expand)</summary>
+              <table class="table table-sm table-bordered mt-2 small">
+                <thead class="table-light">
+                  <tr><th>Code</th><th>Product</th><th class="text-end">MRP</th><th class="text-end">Qty</th></tr>
+                </thead>
+                <tbody>
+                  {% for li in p.line_items %}
+                  <tr>
+                    <td>{{ li.product_code or '' }}</td>
+                    <td>{{ li.product_name or '' }}</td>
+                    <td class="text-end">{{ li.mrp or '' }}</td>
+                    <td class="text-end">{{ li.quantity or '' }} {{ li.unit or '' }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </details>
+            {% endif %}
+
+            {% if p.notes %}
+            <div class="alert alert-info mt-2 mb-0 py-2 small">
+              <i class="bi bi-info-circle me-1"></i><strong>AI note:</strong> {{ p.notes }}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+
+    <div class="d-flex justify-content-between align-items-center sticky-bottom bg-white py-3 border-top">
+      <div class="text-muted small">
+        <i class="bi bi-shield-check me-1"></i>Edits are saved when you confirm.
+      </div>
+      <div>
+        <a href="{{ url_for('extract_upload') }}" class="btn btn-outline-secondary me-2">Discard</a>
+        <button type="submit" class="btn btn-success">
+          <i class="bi bi-check2-circle me-1"></i>Confirm &amp; Continue to Bill
+        </button>
+      </div>
+    </div>
+
+  </form>
+</div>
+
+<style>
+  .is-invalid-low    { background-color:#fff3cd !important; border-color:#ffc107 !important; }
+  .is-warning-medium { background-color:#fff9e6 !important; }
+</style>
+{% endblock %}

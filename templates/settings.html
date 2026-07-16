@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+{% block title %}Settings — Munshi{% endblock %}
+{% block content %}
+<div class="container px-4" style="max-width:760px">
+  <h5 class="fw-bold mb-4">{{ t('Settings') }}</h5>
+
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white fw-semibold">{{ t('Numbering') }}</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label">Next Bill Number</label>
+            <div class="input-group">
+              <span class="input-group-text">JL-</span>
+              <input type="number" name="next_bill_number" class="form-control"
+                     value="{{ next_bill_number }}" min="1" required>
+            </div>
+            <small class="text-muted">e.g. 1 → JL-0001</small>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Next LR (Challan) Number</label>
+            <div class="input-group">
+              <span class="input-group-text">LR-</span>
+              <input type="number" name="next_lr_number" class="form-control"
+                     value="{{ next_lr_number or '13453' }}" min="1" required>
+            </div>
+            <small class="text-muted">Match the next page in your printed challan book.</small>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white fw-semibold">{{ t('Default Client (Consignor)') }}</div>
+      <div class="card-body">
+        <p class="small text-muted">
+          The entity that pays you to transport goods (the consignor on the VBL invoices).
+          This is auto-filled as the bill's <em>Service Recipient</em>. When AI extracts a
+          VBL with a different consignor, you'll get a yellow "confirm new client" warning on the review screen.
+        </p>
+        <div class="row g-2">
+          <div class="col-md-6">
+            <label class="form-label small">Name *</label>
+            <input type="text" name="default_consignor_name" class="form-control form-control-sm"
+                   value="{{ default_consignor_name or '' }}" style="text-transform:uppercase">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">GSTIN</label>
+            <input type="text" name="default_consignor_gstin" class="form-control form-control-sm"
+                   value="{{ default_consignor_gstin or '' }}" style="text-transform:uppercase">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">State Code</label>
+            <input type="text" name="default_consignor_state" class="form-control form-control-sm"
+                   value="{{ default_consignor_state or '' }}" placeholder="e.g. 09">
+          </div>
+          <div class="col-md-12">
+            <label class="form-label small">Address</label>
+            <input type="text" name="default_consignor_address" class="form-control form-control-sm"
+                   value="{{ default_consignor_address or '' }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white fw-semibold">{{ t('Vehicle & Defaults') }}</div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label">Default Vehicle Type</label>
+          <input type="text" name="vehicle_type" class="form-control" style="max-width:200px"
+                 value="{{ vehicle_type }}" placeholder="e.g. A1/A4">
+          <small class="text-muted">Appears on every printed bill.</small>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Freight Type (fixed)</label>
+          <input type="text" name="freight_type" class="form-control" style="max-width:200px"
+                 value="{{ freight_type }}" placeholder="e.g. LP">
+          <small class="text-muted">Same on every bill — set once here.</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white fw-semibold">{{ t('Clients') }}</div>
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label">Default Client</label>
+          <input type="text" name="default_client" class="form-control"
+                 value="{{ default_client }}">
+          <small class="text-muted">Pre-selected in new bill form and used in tax footer.</small>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">All Clients (one per line)</label>
+          <textarea name="clients" class="form-control" rows="5"
+                    placeholder="VARUN BEVERAGES LIMITED">{{ clients_raw }}</textarea>
+          <small class="text-muted">These appear in the Client dropdown when creating a bill.</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Supplier & GST (the entity that ISSUES bills — your own company) ── -->
+    <div class="card mb-4">
+      <div class="card-header bg-dark text-white fw-semibold">
+        <i class="bi bi-receipt me-2"></i>{{ t('Supplier Identity & GST') }}
+      </div>
+      <div class="card-body">
+        <p class="small text-muted mb-3">
+          This is your company's identity that appears at the top of every bill you issue.
+          GSTIN is mandatory if your turnover exceeds the registration threshold.
+        </p>
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label small">Legal name *</label>
+            <input type="text" name="supplier_name" class="form-control form-control-sm" required
+                   value="{{ supplier.name }}" style="text-transform:uppercase">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">GSTIN (15 chars)</label>
+            <input type="text" name="supplier_gstin" class="form-control form-control-sm"
+                   value="{{ supplier.gstin }}"
+                   pattern="^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[0-9A-Z]{1}Z[0-9A-Z]{1}$"
+                   placeholder="09AAAAA0000A1Z5"
+                   style="text-transform:uppercase; font-family:monospace">
+            <small class="text-muted">Leave empty if you're not GST-registered yet.</small>
+          </div>
+          <div class="col-md-12">
+            <label class="form-label small">Registered address *</label>
+            <textarea name="supplier_address" class="form-control form-control-sm" rows="2"
+                      required>{{ supplier.address }}</textarea>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">State *</label>
+            <select name="supplier_state_code" class="form-select form-select-sm" required>
+              {% for code, name in gst_states.items() %}
+                <option value="{{ code }}" {{ 'selected' if code == supplier.state_code }}>{{ code }} — {{ name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">PAN</label>
+            <input type="text" name="supplier_pan" class="form-control form-control-sm"
+                   value="{{ supplier.pan }}" style="text-transform:uppercase; font-family:monospace"
+                   pattern="^[A-Z]{5}[0-9]{4}[A-Z]{1}$" placeholder="AAAAA0000A">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Phone</label>
+            <input type="text" name="supplier_phone" class="form-control form-control-sm"
+                   value="{{ supplier.phone }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Email</label>
+            <input type="email" name="supplier_email" class="form-control form-control-sm"
+                   value="{{ supplier.email }}">
+          </div>
+          <div class="col-md-5">
+            <label class="form-label small">Bank account holder</label>
+            <input type="text" name="supplier_bank_name" class="form-control form-control-sm"
+                   value="{{ supplier.bank_name }}">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small">Account number</label>
+            <input type="text" name="supplier_bank_account" class="form-control form-control-sm"
+                   value="{{ supplier.bank_account }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">IFSC</label>
+            <input type="text" name="supplier_bank_ifsc" class="form-control form-control-sm"
+                   value="{{ supplier.bank_ifsc }}" style="text-transform:uppercase; font-family:monospace">
+          </div>
+        </div>
+
+        <hr class="my-4">
+
+        <h6 class="fw-semibold mb-3">Default GST values for new bills</h6>
+        <div class="row g-3">
+          <div class="col-md-3">
+            <label class="form-label small">HSN / SAC code</label>
+            <input type="text" name="default_hsn_sac" class="form-control form-control-sm"
+                   value="{{ default_hsn_sac }}" placeholder="996511">
+            <small class="text-muted">996511 = Goods transport by road.</small>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">GST rate % (forward charge)</label>
+            <input type="number" step="0.5" name="default_gst_pct" class="form-control form-control-sm"
+                   value="{{ default_gst_pct }}">
+            <small class="text-muted">5% for GTA (forward charge), 12% with full ITC.</small>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">Reverse charge default</label>
+            <div class="form-check mt-2">
+              <input type="checkbox" name="default_reverse_charge" class="form-check-input"
+                     id="default_rcm" {{ 'checked' if default_reverse_charge }}>
+              <label class="form-check-label small" for="default_rcm">
+                New bills default to <strong>"Tax payable under reverse charge"</strong> (recommended for GTA — recipient pays GST).
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button type="submit" class="btn btn-primary">{{ t('Save Settings') }}</button>
+  </form>
+
+  <!-- ── Google Drive backup (separate forms — outside the settings form) ── -->
+  <div class="card mt-4" id="drive">
+    <div class="card-header bg-dark text-white fw-semibold d-flex justify-content-between align-items-center">
+      <span><i class="bi bi-cloud-arrow-up me-2"></i>Google Drive Backup</span>
+      {% if drive_state.last_sync_status == 'ok' %}
+        <span class="badge bg-success">Connected</span>
+      {% elif drive_state.last_sync_status == 'reauth_required' %}
+        <span class="badge bg-danger">Reconnect needed</span>
+      {% elif drive_state.last_sync_status in ('offline', 'error', 'quota') %}
+        <span class="badge bg-warning text-dark">{{ drive_state.last_sync_status|capitalize }}</span>
+      {% else %}
+        <span class="badge bg-secondary">Not connected</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+
+      {% if not drive_configured %}
+        {# Owner / admin hasn't set up OAuth client yet #}
+        <div class="alert alert-info small mb-0">
+          <strong><i class="bi bi-info-circle me-1"></i>Drive backup not configured by administrator.</strong>
+          A Google Cloud OAuth client must be set up before customers can connect their Drive.
+          See <code>docs/OPS_RUNBOOK.md</code> Section 2.4 for the 10-minute setup.
+        </div>
+
+      {% elif drive_state.last_sync_status == 'reauth_required' %}
+        <div class="alert alert-danger d-flex align-items-center mb-3">
+          <i class="bi bi-shield-exclamation me-2 fs-4"></i>
+          <div class="flex-grow-1">
+            <strong>Google revoked our access.</strong>
+            {{ drive_state.last_sync_error or 'Please reconnect to resume backups.' }}
+          </div>
+          <a href="{{ url_for('drive_connect') }}" class="btn btn-danger btn-sm">Reconnect</a>
+        </div>
+
+      {% elif drive_state.refresh_token %}
+        {# Connected: show status table + action buttons #}
+        <table class="table table-sm small mb-3">
+          <tr><th class="text-muted" style="width:180px">Connected as</th>
+              <td><strong>{{ drive_state.connected_email or '—' }}</strong></td></tr>
+          <tr><th class="text-muted">Backup folder</th>
+              <td>
+                {% if drive_state.folder_id %}
+                  <a href="https://drive.google.com/drive/folders/{{ drive_state.folder_id }}"
+                     target="_blank" rel="noopener">
+                    {{ drive_state.folder_name or 'Munshi Backups' }} ↗
+                  </a>
+                {% else %}—{% endif %}
+              </td></tr>
+          <tr><th class="text-muted">Last sync</th>
+              <td>
+                {% if drive_state.last_sync_at %}
+                  {{ drive_state.last_sync_at[:19].replace('T', ' ') }} UTC
+                  {% if drive_state.last_uploaded_file %}
+                    · <code>{{ drive_state.last_uploaded_file }}</code>
+                  {% endif %}
+                {% else %}never{% endif %}
+              </td></tr>
+          {% if drive_state.last_sync_status not in ('ok',) and drive_state.last_sync_error %}
+          <tr><th class="text-muted">Last error</th>
+              <td class="text-danger small">{{ drive_state.last_sync_error }}</td></tr>
+          {% endif %}
+        </table>
+
+        <form method="post" action="{{ url_for('drive_sync_now') }}" class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-sm btn-outline-primary">
+            <i class="bi bi-arrow-clockwise me-1"></i>Sync now
+          </button>
+        </form>
+        <form method="post" action="{{ url_for('drive_disconnect') }}" class="d-inline ms-1"
+              onsubmit="return confirm('Disconnect Google Drive? Your backup files in Drive will remain — only the connection is removed.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-sm btn-outline-danger">
+            <i class="bi bi-x-circle me-1"></i>Disconnect
+          </button>
+        </form>
+
+      {% else %}
+        {# Not yet connected #}
+        <p class="text-muted small mb-3">
+          Your daily SQLite backup file is uploaded to a folder in <strong>your own</strong>
+          Google Drive. We use the minimal <code>drive.file</code> scope — we can only see files
+          we create, never your other Drive contents. Your data never touches our servers.
+        </p>
+        <a href="{{ url_for('drive_connect') }}" class="btn btn-primary">
+          <i class="bi bi-google me-1"></i>Connect Google Drive
+        </a>
+        <small class="text-muted ms-2">Opens Google sign-in in this tab.</small>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ── Freight rate list (separate forms — uploads file independently) ── -->
+  <div class="card mt-4">
+    <div class="card-header bg-dark text-white fw-semibold d-flex justify-content-between align-items-center">
+      <span>Freight Rate List</span>
+      <span class="badge bg-secondary">{{ rate_list|length }} rows loaded</span>
+    </div>
+    <div class="card-body">
+      <p class="small text-muted mb-3">
+        Upload your master rate-list Excel (same layout as <em>Book1.xlsx</em>: customer name,
+        party code, location, distances, then 4 rate columns LP-OWY / LP-TWY / Trolla-OWY / Trolla-TWY).
+        On the bill form, the freight rate auto-fills based on Consignee + Vehicle Type + Trip Type.
+      </p>
+
+      <div class="d-flex gap-2 mb-3 flex-wrap">
+        <a href="{{ url_for('rate_list_editor') }}" class="btn btn-success btn-sm">
+          <i class="bi bi-pencil-square me-1"></i>Open Rate List Editor (add / edit / delete rows)
+        </a>
+      </div>
+
+      <form method="post" action="{{ url_for('upload_rate_list') }}" enctype="multipart/form-data" class="d-flex gap-2 mb-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="file" name="rate_file" accept=".xlsx,.xlsm" class="form-control form-control-sm" required>
+        <button type="submit" class="btn btn-primary btn-sm">
+          <i class="bi bi-upload me-1"></i>Bulk import from Excel
+        </button>
+      </form>
+
+      {% if rate_list %}
+        <div class="table-responsive" style="max-height:400px">
+          <table class="table table-sm table-bordered table-striped small mb-2">
+            <thead class="table-dark sticky-top">
+              <tr>
+                <th>Customer</th><th>Code</th><th>Location</th>
+                <th class="text-end">TWY km</th><th class="text-end">OWY km</th>
+                <th class="text-end">LP-OWY</th><th class="text-end">LP-TWY</th>
+                <th class="text-end">Trolla-OWY</th><th class="text-end">Trolla-TWY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in rate_list %}
+              <tr>
+                <td>{{ r.customer_name }}</td>
+                <td>{{ r.party_code or '' }}</td>
+                <td>{{ r.location or '' }}</td>
+                <td class="text-end">{{ r.dist_twy_km or '' }}</td>
+                <td class="text-end">{{ r.dist_owy_km or '' }}</td>
+                <td class="text-end">{{ '{:,.2f}'.format(r.lp_owy) if r.lp_owy else '' }}</td>
+                <td class="text-end">{{ '{:,.2f}'.format(r.lp_twy) if r.lp_twy else '' }}</td>
+                <td class="text-end">{{ '{:,.2f}'.format(r.trolla_owy) if r.trolla_owy else '' }}</td>
+                <td class="text-end">{{ '{:,.2f}'.format(r.trolla_twy) if r.trolla_twy else '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <form method="post" action="{{ url_for('clear_rate_list') }}"
+              onsubmit="return confirm('Clear all {{ rate_list|length }} rate rows?')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-outline-danger btn-sm">
+            <i class="bi bi-trash me-1"></i>Clear all rates
+          </button>
+        </form>
+      {% else %}
+        <div class="text-muted small">No rates loaded yet — upload your Excel above.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

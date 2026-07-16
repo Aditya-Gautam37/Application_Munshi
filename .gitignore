@@ -1,0 +1,58 @@
+# ════════════════════════════════════════════════════════════════════════
+# CRITICAL — secrets and personal data that must NEVER reach GitHub
+# ════════════════════════════════════════════════════════════════════════
+.env
+.flask_secret
+
+# Live customer database (every bill, ledger, challan, payment) + any stray
+# copy. Use BROAD patterns, not individual filenames, so new/forgotten DBs are
+# caught automatically. NOTE: .gitignore has no inline comments — a '#' after a
+# pattern becomes part of it — so every comment lives on its own line here.
+*.db
+*.sqlite
+*.sqlite3
+*.db.backup
+# SQLite WAL/SHM sidecars: bills.db-wal, bills.db-shm, data.db-wal, ...
+*.db-*
+# Whole bills.* family incl. odd copies: bills_backup.db, bills.db.backup,
+# bills-YYYY-MM-DD.db, bills_backup.dbcls
+bills*.db*
+data.db
+
+# Explicit allow: the shipped SEED databases are blank/fake master data (rate
+# list only — no real business data) and ARE version-controlled. These win over
+# the *.db rule above because data/ itself is never ignored.
+!data/seed.db
+!data/seed_blank.db
+!data/seed_demo.db
+
+# License server database — real customer keys; NEVER commit.
+# (Already covered by *.db above; kept explicit as documentation.)
+license-server/licenses.db
+
+# Daily DB backups — contains exact same data as bills.db (whole folder ignored)
+backups/
+
+# Photos uploaded by users — challans, PODs, ledger pages
+uploads/
+
+# Sample test invoices — may contain customer GSTIN/identifiers
+sample-vbls/
+
+# Claude Code session files — local-only tooling state
+.claude/
+
+# ════════════════════════════════════════════════════════════════════════
+# Build artifacts — regenerated from build/munshi.spec
+# ════════════════════════════════════════════════════════════════════════
+build/dist/
+build/work/
+
+# Python compile artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# OS junk
+.DS_Store
+Thumbs.db

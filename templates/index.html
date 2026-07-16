@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty %}
+{% block title %}Bills — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header(
+    'Bills',
+    'All client bills — search, view, edit, share',
+    '<a href="' ~ url_for('new_bill') ~ '" class="btn btn-success"><i class="bi bi-plus-circle me-1"></i>New Bill</a>'
+) }}
+
+<form class="card mb-3" method="get">
+  <div class="card-body py-2">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-6">
+        <label class="form-label small">Search bill no. or client</label>
+        <input class="form-control form-control-sm" name="q" value="{{ search }}"
+               placeholder="e.g. 25-26/123 or ACME">
+      </div>
+      <div class="col-md-6 text-end">
+        <button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-search me-1"></i>Search</button>
+        {% if search %}<a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Clear</a>{% endif %}
+      </div>
+    </div>
+  </div>
+</form>
+
+{% if bills %}
+<div class="jl-card">
+<div class="table-responsive">
+  <table class="table table-hover align-middle small mb-0 jl-mobile-cards">
+    <thead class="table-light">
+      <tr>
+        <th>Bill No.</th>
+        <th>Date</th>
+        <th>Client / Recipient</th>
+        <th class="text-end">Amount (₹)</th>
+        <th class="text-center" style="width:140px">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in bills %}
+      <tr>
+        <td data-label="Bill No."><a href="{{ url_for('view_bill', bill_id=b.id) }}" class="fw-semibold">{{ b.bill_no }}</a></td>
+        <td class="text-nowrap" data-label="Date">{{ b.bill_date or '—' }}</td>
+        <td data-label="Recipient">{{ b.recipient_name or '—' }}</td>
+        <td class="text-end fw-semibold" data-label="Amount">{{ '{:,.2f}'.format(b.total_amount) }}</td>
+        <td class="text-center">
+          <a href="{{ url_for('view_bill', bill_id=b.id) }}" class="btn btn-sm btn-outline-primary" title="View / Print">
+            <i class="bi bi-eye"></i>
+          </a>
+          <a href="{{ url_for('edit_bill', bill_id=b.id) }}" class="btn btn-sm btn-outline-secondary" title="Edit">
+            <i class="bi bi-pencil"></i>
+          </a>
+          <form method="post" action="{{ url_for('delete_bill', bill_id=b.id) }}" class="d-inline"
+                onsubmit="return confirm('Delete {{ b.bill_no }}? This cannot be undone.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-sm btn-outline-danger" title="Delete"><i class="bi bi-trash"></i></button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+</div>
+<p class="text-muted small mt-2">{{ bills|length }} bill{{ '' if bills|length == 1 else 's' }}</p>
+{% else %}
+<div class="jl-card">
+{{ empty(
+  'No bills yet' if not search else 'No bills match your search',
+  'Bills are generated from POD-received challans. Create one manually, or use "Ready to bill" to convert delivered challans into bills in one click.',
+  'bi-receipt', 'Create first bill', url_for('new_bill')
+) }}
+</div>
+{% endif %}
+{% endblock %}

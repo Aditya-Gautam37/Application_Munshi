@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header %}
+{% block title %}Reading invoice — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header('Reading your invoice',
+   'AI is extracting fields in the background — this page auto-refreshes when done.') }}
+
+<div class="row justify-content-center">
+  <div class="col-md-8 col-lg-6">
+    <div class="jl-card">
+      <div class="px-4 py-4 text-center">
+        {# Spinner #}
+        <div class="mb-3" id="jlSpinnerWrap">
+          <div class="spinner-border text-primary" role="status" style="width:3rem;height:3rem">
+            <span class="visually-hidden">Reading…</span>
+          </div>
+        </div>
+
+        {# Status line #}
+        <h5 class="mb-2" id="jlExtractTitle">Reading VBL invoice</h5>
+        <p class="text-muted mb-1" id="jlExtractNote">{{ extraction.note or 'Starting…' }}</p>
+        <p class="small text-muted">elapsed: <span id="jlExtractElapsed">0s</span></p>
+
+        {# Helpful copy that doesn't lie #}
+        <div class="alert alert-info small text-start mt-4" id="jlExtractHint">
+          <i class="bi bi-info-circle me-1"></i>
+          You can leave this tab and come back — extraction continues in the background.
+          Most invoices finish in 10–25 seconds; dense handwritten pages can take 40–60.
+        </div>
+
+        {# Failure UI (revealed by JS only if status === 'failed') #}
+        <div id="jlExtractFail" class="alert alert-danger text-start" style="display:none">
+          <strong><i class="bi bi-exclamation-triangle me-1"></i>Extraction failed.</strong>
+          <div class="small mt-1" id="jlExtractFailMsg"></div>
+          <div class="mt-2">
+            <a href="{{ url_for('extract_upload') }}" class="btn btn-sm btn-primary">
+              <i class="bi bi-arrow-clockwise me-1"></i>Try again
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const noteEl    = document.getElementById('jlExtractNote');
+  const elapsedEl = document.getElementById('jlExtractElapsed');
+  const failBox   = document.getElementById('jlExtractFail');
+  const failMsg   = document.getElementById('jlExtractFailMsg');
+  const spinner   = document.getElementById('jlSpinnerWrap');
+  const hint      = document.getElementById('jlExtractHint');
+  const startedAt = Date.now();
+  let pollHandle  = null;
+
+  function tickElapsed() {
+    const sec = Math.floor((Date.now() - startedAt) / 1000);
+    elapsedEl.textContent = sec + 's';
+  }
+  setInterval(tickElapsed, 250);
+
+  async function poll() {
+    try {
+      const r = await fetch('{{ url_for("extract_status", extraction_id=extraction.id) }}', {
+        cache: 'no-store',
+      });
+      if (!r.ok) throw new Error('status ' + r.status);
+      const data = await r.json();
+
+      if (data.note) noteEl.textContent = data.note;
+
+      if (data.status === 'extracted' || data.status === 'reviewed' || data.status === 'used') {
+        // Done — go to the review page (this same URL, but the server will now
+        // render the review form instead of the processing page)
+        clearInterval(pollHandle);
+        window.location.reload();
+        return;
+      }
+      if (data.status === 'failed') {
+        clearInterval(pollHandle);
+        spinner.style.display = 'none';
+        hint.style.display = 'none';
+        failMsg.textContent = data.note || 'Unknown error';
+        failBox.style.display = 'block';
+        return;
+      }
+    } catch (e) {
+      // Transient errors are fine — keep polling
+      console.warn('poll error', e);
+    }
+  }
+
+  poll();                    // immediate first poll
+  pollHandle = setInterval(poll, 2000);   // then every 2s
+})();
+</script>
+{% endblock %}

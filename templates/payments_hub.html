@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty, kpi, client_balance_pill, vendor_balance_pill %}
+{% block title %}Payments — Munshi{% endblock %}
+{% block content %}
+
+{% macro money(v) -%}
+₹{{ '{:,.0f}'.format(v or 0) }}
+{%- endmacro %}
+
+{{ page_header(t('Payments'), t('Receivables & Payables — every party at a glance')) }}
+
+<!-- ── Summary KPIs ── -->
+<div class="jl-kpi-grid mb-4">
+  {{ kpi(t('Receivable from clients'), money(receivable_total),
+         t('money clients still owe you'), 'bi-cash-stack', 'warning') }}
+  {{ kpi(t('Payable to transporters'), money(transporter_payable),
+         t('unpaid balance to vehicle owners'), 'bi-truck-flatbed', 'info') }}
+  {{ kpi(t('Payable to diesel vendors'), money(diesel_payable),
+         t('unsettled fuel'), 'bi-fuel-pump', 'primary') }}
+  {{ kpi(t('Net cash position'), money(net_position),
+         t('receivable − all payables'), 'bi-graph-up',
+         'success' if net_position > 0 else 'danger') }}
+</div>
+
+<!-- ── Tabs ── -->
+<div class="jl-card">
+<ul class="nav nav-tabs px-3 pt-3" role="tablist" style="border-color: var(--jl-divider)">
+  <li class="nav-item">
+    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-clients" type="button">
+      <i class="bi bi-people me-1"></i>{{ t('Clients') }} ({{ clients|length }})
+    </button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-transporters" type="button">
+      <i class="bi bi-truck-flatbed me-1"></i>{{ t('Transporters') }} ({{ transporters|length }})
+    </button>
+  </li>
+  <li class="nav-item">
+    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-diesel" type="button">
+      <i class="bi bi-fuel-pump me-1"></i>{{ t('Diesel Vendors') }} ({{ diesel_vendors|length }})
+    </button>
+  </li>
+</ul>
+
+<div class="tab-content">
+
+  <!-- Clients -->
+  <div class="tab-pane fade show active p-3" id="tab-clients">
+    {% if clients %}
+      <div class="table-responsive">
+      <table class="table table-hover table-sm align-middle">
+        <thead class="table-light">
+          <tr><th>{{ t('Client') }}</th><th>{{ t('Balance') }}</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for c in clients %}
+          <tr>
+            <td><a href="{{ url_for('party_detail', party_type='client', party_key=c.name) }}" class="fw-semibold">{{ c.name }}</a></td>
+            <td>{{ client_balance_pill(c.balance) }}</td>
+            <td class="text-end" style="width:140px">
+              <a href="{{ url_for('party_detail', party_type='client', party_key=c.name) }}"
+                 class="btn btn-sm btn-outline-primary">
+                {{ t('Open ledger →') }}
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      {{ empty(t('No clients yet'),
+               t('Once you create your first bill, the client appears here with their running balance.'),
+               'bi-people') }}
+    {% endif %}
+  </div>
+
+  <!-- Transporters -->
+  <div class="tab-pane fade p-3" id="tab-transporters">
+    {% if transporters %}
+      <div class="table-responsive">
+      <table class="table table-hover table-sm align-middle">
+        <thead class="table-light">
+          <tr><th>{{ t('Transporter') }}</th><th>{{ t('Mobile') }}</th><th>{{ t('Balance owed by us') }}</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for t in transporters %}
+          <tr>
+            <td><a href="{{ url_for('party_detail', party_type='transporter', party_key=t.id) }}" class="fw-semibold">{{ t.name }}</a></td>
+            <td>{{ t.mobile or '' }}</td>
+            <td>{{ vendor_balance_pill(t.balance) }}</td>
+            <td class="text-end" style="width:140px">
+              <a href="{{ url_for('party_detail', party_type='transporter', party_key=t.id) }}"
+                 class="btn btn-sm btn-outline-primary">{{ t('Open ledger →') }}</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <p class="small text-muted px-2">
+        Balance = Σ(freight) − Σ(advances paid at trip time) − Σ(direct settlement payments).
+        Advances include cash to driver, account transfers, and diesel given.
+      </p>
+    {% else %}
+      {{ empty(t('No transporters yet'),
+               t('Add transporters in Masters to start tracking their advances and balances.'),
+               'bi-truck-flatbed', t('Open Masters'), url_for('masters_index')) }}
+    {% endif %}
+  </div>
+
+  <!-- Diesel vendors -->
+  <div class="tab-pane fade p-3" id="tab-diesel">
+    {% if diesel_vendors %}
+      <div class="table-responsive">
+      <table class="table table-hover table-sm align-middle">
+        <thead class="table-light">
+          <tr><th>{{ t('Vendor') }}</th><th>{{ t('Location') }}</th><th>{{ t('Unsettled fuel') }}</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for v in diesel_vendors %}
+          <tr>
+            <td><a href="{{ url_for('party_detail', party_type='diesel_vendor', party_key=v.id) }}" class="fw-semibold">{{ v.name }}</a></td>
+            <td>{{ v.location or '' }}</td>
+            <td>{{ vendor_balance_pill(v.balance) }}</td>
+            <td class="text-end" style="width:140px">
+              <a href="{{ url_for('party_detail', party_type='diesel_vendor', party_key=v.id) }}"
+                 class="btn btn-sm btn-outline-primary">{{ t('Open ledger →') }}</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <p class="small text-muted px-2">Balance = Σ(diesel given on trips from this pump) − Σ(payments to this pump).</p>
+    {% else %}
+      {{ empty(t('No diesel vendors yet'),
+               t('Add diesel pumps in Masters so each fuel entry can be linked to a vendor.'),
+               'bi-fuel-pump', t('Open Masters'), url_for('masters_index')) }}
+    {% endif %}
+  </div>
+
+</div>
+</div>
+{% endblock %}

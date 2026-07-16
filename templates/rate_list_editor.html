@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}Rate List Editor — Munshi{% endblock %}
+{% block content %}
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">
+      <i class="bi bi-cash-coin me-2"></i>Freight Rate List
+      <small class="text-muted fw-normal ms-2">{{ rates|length }} row{{ '' if rates|length == 1 else 's' }}</small>
+    </h5>
+    <a href="{{ url_for('settings') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left"></i> Back to Settings
+    </a>
+  </div>
+
+  <p class="text-muted small">
+    Edit cells inline → click <strong>Save</strong> on that row.
+    Use <strong>Add new row</strong> at top to add manually.
+    For bulk imports, use the Excel upload in Settings.
+  </p>
+
+  <!-- ── Search ── -->
+  <form method="get" class="card mb-3">
+    <div class="card-body py-2 d-flex gap-2 align-items-center">
+      <input type="text" name="q" class="form-control form-control-sm" style="max-width:300px"
+             placeholder="Search customer / location / party code"
+             value="{{ filters.q or '' }}">
+      <button class="btn btn-primary btn-sm">Search</button>
+      {% if filters.q %}
+        <a href="{{ url_for('rate_list_editor') }}" class="btn btn-outline-secondary btn-sm">Clear</a>
+      {% endif %}
+    </div>
+  </form>
+
+  <!-- ── Add new row (regular HTML form, no nesting issues) ── -->
+  <div class="card mb-3 border-success">
+    <div class="card-header bg-success text-white py-2 fw-semibold">
+      <i class="bi bi-plus-circle me-1"></i>Add new rate row
+    </div>
+    <div class="card-body py-2">
+      <form method="post" action="{{ url_for('rate_list_add') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="row g-2 align-items-end small">
+          <div class="col-md-2">
+            <label class="form-label tiny">Customer *</label>
+            <input type="text" name="customer_name" class="form-control form-control-sm" required style="text-transform:uppercase">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">Code</label>
+            <input type="text" name="party_code" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label tiny">Location</label>
+            <input type="text" name="location" class="form-control form-control-sm" style="text-transform:uppercase">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">TWY km</label>
+            <input type="number" name="dist_twy_km" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">OWY km</label>
+            <input type="number" name="dist_owy_km" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">LP-OWY ₹</label>
+            <input type="number" step="any" name="lp_owy" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">LP-TWY ₹</label>
+            <input type="number" step="any" name="lp_twy" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">Trolla-OWY ₹</label>
+            <input type="number" step="any" name="trolla_owy" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label tiny">Trolla-TWY ₹</label>
+            <input type="number" step="any" name="trolla_twy" class="form-control form-control-sm">
+          </div>
+          <div class="col-md-1">
+            <button class="btn btn-success btn-sm w-100"><i class="bi bi-plus"></i> Add</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Existing rates table — JS-driven row update/delete (no nested forms) ── -->
+  {% if rates %}
+  <div class="table-responsive">
+    <table class="table table-bordered table-sm align-middle small mb-0" id="ratesTable">
+      <thead class="table-dark">
+        <tr>
+          <th>Customer</th>
+          <th>Code</th>
+          <th>Location</th>
+          <th class="text-end">TWY km</th>
+          <th class="text-end">OWY km</th>
+          <th class="text-end">LP-OWY</th>
+          <th class="text-end">LP-TWY</th>
+          <th class="text-end">Trolla-OWY</th>
+          <th class="text-end">Trolla-TWY</th>
+          <th class="text-center" style="width:140px"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rates %}
+        <tr id="row_{{ r.id }}" data-rid="{{ r.id }}">
+          <td><input type="text" name="customer_name" class="form-control form-control-sm" value="{{ r.customer_name or '' }}" style="text-transform:uppercase; min-width:160px"></td>
+          <td><input type="text" name="party_code" class="form-control form-control-sm" style="width:80px" value="{{ r.party_code or '' }}"></td>
+          <td><input type="text" name="location" class="form-control form-control-sm" value="{{ r.location or '' }}" style="text-transform:uppercase; min-width:130px"></td>
+          <td><input type="number" name="dist_twy_km" class="form-control form-control-sm text-end" style="width:70px" value="{{ r.dist_twy_km or '' }}"></td>
+          <td><input type="number" name="dist_owy_km" class="form-control form-control-sm text-end" style="width:70px" value="{{ r.dist_owy_km or '' }}"></td>
+          <td><input type="number" step="any" name="lp_owy" class="form-control form-control-sm text-end" style="width:90px" value="{{ '{:.2f}'.format(r.lp_owy) if r.lp_owy else '' }}"></td>
+          <td><input type="number" step="any" name="lp_twy" class="form-control form-control-sm text-end" style="width:90px" value="{{ '{:.2f}'.format(r.lp_twy) if r.lp_twy else '' }}"></td>
+          <td><input type="number" step="any" name="trolla_owy" class="form-control form-control-sm text-end" style="width:90px" value="{{ '{:.2f}'.format(r.trolla_owy) if r.trolla_owy else '' }}"></td>
+          <td><input type="number" step="any" name="trolla_twy" class="form-control form-control-sm text-end" style="width:90px" value="{{ '{:.2f}'.format(r.trolla_twy) if r.trolla_twy else '' }}"></td>
+          <td class="text-center text-nowrap">
+            <button class="btn btn-sm btn-primary py-0 px-2 me-1" onclick="saveRow({{ r.id }})" title="Save changes">
+              <i class="bi bi-check2"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-danger py-0 px-2"
+                    onclick="deleteRow({{ r.id }}, '{{ (r.customer_name or '')|replace("'", "\\'") }}')"
+                    title="Delete this row">
+              <i class="bi bi-trash"></i>
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="text-center text-muted py-5">
+    {% if filters.q %}
+      No rate rows match "{{ filters.q }}".
+    {% else %}
+      No rate rows yet. Use "Add new rate row" above, or upload your Excel from Settings.
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<style>.tiny { font-size: 11px; margin-bottom: 0.1rem; }</style>
+
+<script>
+const SEARCH_QS = {{ ('?q=' + filters.q) | tojson if filters.q else "''" }};
+
+function csrfHeader() {
+  const t = document.querySelector('meta[name="csrf-token"]');
+  return t ? { 'X-CSRFToken': t.content } : {};
+}
+
+async function saveRow(rid) {
+  const tr = document.getElementById('row_' + rid);
+  if (!tr) return;
+  const data = new FormData();
+  tr.querySelectorAll('input').forEach(i => data.set(i.name, i.value));
+  const btn = tr.querySelector('button[onclick^="saveRow"]');
+  const oldHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+  try {
+    const r = await fetch('/rate-list/' + rid + '/update' + SEARCH_QS, {
+      method: 'POST', body: data, redirect: 'follow', headers: csrfHeader()
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    btn.innerHTML = '<i class="bi bi-check2-circle"></i>';
+    btn.classList.remove('btn-primary'); btn.classList.add('btn-success');
+    setTimeout(() => {
+      btn.innerHTML = oldHtml;
+      btn.classList.remove('btn-success'); btn.classList.add('btn-primary');
+      btn.disabled = false;
+    }, 1200);
+  } catch (e) {
+    alert('Could not save: ' + e.message);
+    btn.innerHTML = oldHtml; btn.disabled = false;
+  }
+}
+
+async function deleteRow(rid, name) {
+  if (!confirm('Delete rate row for ' + (name || 'this customer') + '?')) return;
+  const r = await fetch('/rate-list/' + rid + '/delete' + SEARCH_QS, {method: 'POST', headers: csrfHeader()});
+  if (r.ok) document.getElementById('row_' + rid).remove();
+  else alert('Could not delete: HTTP ' + r.status);
+}
+</script>
+{% endblock %}

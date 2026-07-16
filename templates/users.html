@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty, pill %}
+{% block title %}Users — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header('Users',
+   'Team accounts — admin can add, reset passwords, change roles, or deactivate') }}
+
+<div class="alert alert-info small">
+  <i class="bi bi-info-circle me-1"></i>
+  When you add a new user, their first-login password is the same as their username.
+  They will be forced to set a real password before they can use the app.
+</div>
+
+<!-- ── Add user form ── -->
+<div class="jl-card mb-3">
+  <div class="jl-card-header">
+    <div>
+      <div class="jl-card-title"><i class="bi bi-person-plus me-2"></i>Add new user</div>
+      <div class="jl-card-subtitle">First-login password = username (forced change)</div>
+    </div>
+  </div>
+  <form method="post" action="{{ url_for('users_add') }}" class="px-3 pb-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label small fw-semibold">Username *</label>
+        <input type="text" name="username" class="form-control form-control-sm" required
+               minlength="2" placeholder="e.g. Rohit">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small fw-semibold">Full name</label>
+        <input type="text" name="full_name" class="form-control form-control-sm"
+               placeholder="(defaults to username)">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small fw-semibold">Role</label>
+        <select name="role" class="form-select form-select-sm">
+          <option value="operator" selected>Operator</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="col-md-2 text-end">
+        <button class="btn btn-success btn-sm w-100"><i class="bi bi-plus-circle me-1"></i>Create</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- ── Users list ── -->
+{% if users %}
+<div class="jl-card">
+<div class="table-responsive">
+  <table class="table table-hover align-middle small mb-0">
+    <thead class="table-light">
+      <tr>
+        <th>Username</th>
+        <th>Full name</th>
+        <th>Role</th>
+        <th>Status</th>
+        <th>Last login</th>
+        <th>Created</th>
+        <th class="text-end" style="min-width: 280px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr class="{{ '' if u.is_active else 'text-muted' }}">
+        <td class="fw-semibold">
+          {{ u.username }}
+          {% if u.username == current_user %}<small class="text-muted">(you)</small>{% endif %}
+        </td>
+        <td>{{ u.full_name or '—' }}</td>
+        <td>
+          {% if u.role == 'admin' %}{{ pill('Admin', 'warning') }}
+          {% else %}{{ pill('Operator', 'neutral') }}{% endif %}
+        </td>
+        <td>
+          {% if not u.is_active %}{{ pill('Deactivated', 'danger') }}
+          {% elif u.must_change_password %}{{ pill('Awaiting first login', 'info') }}
+          {% else %}{{ pill('Active', 'success') }}{% endif %}
+        </td>
+        <td><small class="text-muted">{{ u.last_login | date if u.last_login else 'never' }}</small></td>
+        <td><small class="text-muted">{{ u.created_at | date if u.created_at else '—' }}</small></td>
+        <td class="text-end">
+          {# Reset password #}
+          <form method="post" action="{{ url_for('users_reset_password', username=u.username) }}"
+                class="d-inline" onsubmit="return confirm('Reset password for {{ u.username }}? New password will be \'{{ u.username }}\' and they will be forced to change it.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-sm btn-outline-warning" title="Reset password">
+              <i class="bi bi-key"></i>
+            </button>
+          </form>
+
+          {# Change role #}
+          <form method="post" action="{{ url_for('users_change_role', username=u.username) }}"
+                class="d-inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="role" value="{{ 'operator' if u.role == 'admin' else 'admin' }}">
+            <button class="btn btn-sm btn-outline-secondary"
+                    title="Make {{ 'operator' if u.role == 'admin' else 'admin' }}"
+                    onclick="return confirm('Change {{ u.username }} to {{ 'Operator' if u.role == 'admin' else 'Admin' }}?')"
+                    {{ 'disabled' if u.username == current_user and u.role == 'admin' }}>
+              <i class="bi bi-{{ 'arrow-down' if u.role == 'admin' else 'arrow-up' }}"></i>
+              {{ 'Demote' if u.role == 'admin' else 'Promote' }}
+            </button>
+          </form>
+
+          {# Activate / Deactivate #}
+          {% if u.is_active %}
+            <form method="post" action="{{ url_for('users_deactivate', username=u.username) }}"
+                  class="d-inline" onsubmit="return confirm('Deactivate {{ u.username }}? They will no longer be able to sign in.')">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button class="btn btn-sm btn-outline-danger" title="Deactivate"
+                      {{ 'disabled' if u.username == current_user }}>
+                <i class="bi bi-x-circle"></i> Disable
+              </button>
+            </form>
+          {% else %}
+            <form method="post" action="{{ url_for('users_activate', username=u.username) }}"
+                  class="d-inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button class="btn btn-sm btn-outline-success" title="Re-activate">
+                <i class="bi bi-check-circle"></i> Enable
+              </button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+</div>
+<p class="text-muted small mt-2">
+  {{ users|length }} account{{ '' if users|length == 1 else 's' }} ·
+  Admin can manage users · Operators see operations only · Both have full access to challans, ledger, bills.
+</p>
+{% else %}
+<div class="jl-card">
+{{ empty('No users yet', 'Use the form above to create the first account.', 'bi-people') }}
+</div>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, pill %}
+{% block title %}License — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header('License', 'Your Munshi subscription status') }}
+
+{# ── Status panel ── #}
+<div class="jl-card mb-3">
+  <div class="px-4 py-4">
+    <div class="d-flex align-items-center gap-3 mb-3">
+      {% if state.status == 'active' %}
+        <i class="bi bi-shield-check fs-1 text-success"></i>
+        <div>
+          <h4 class="mb-0">Active</h4>
+          <div class="text-muted small">{{ state.message or '' }}</div>
+        </div>
+      {% elif state.status == 'grace' %}
+        <i class="bi bi-shield-exclamation fs-1 text-warning"></i>
+        <div>
+          <h4 class="mb-0 text-warning">Grace period — please renew</h4>
+          <div class="text-muted small">{{ state.message or '' }}</div>
+        </div>
+      {% elif state.status == 'locked' %}
+        <i class="bi bi-shield-lock fs-1 text-danger"></i>
+        <div>
+          <h4 class="mb-0 text-danger">Read-only mode</h4>
+          <div class="text-muted small">{{ state.message or '' }}</div>
+        </div>
+      {% elif state.status == 'suspended' %}
+        <i class="bi bi-shield-x fs-1 text-danger"></i>
+        <div>
+          <h4 class="mb-0 text-danger">Suspended</h4>
+          <div class="text-muted small">{{ state.message or '' }}</div>
+        </div>
+      {% elif state.status == 'not_found' %}
+        <i class="bi bi-question-circle fs-1 text-danger"></i>
+        <div>
+          <h4 class="mb-0 text-danger">Unknown license key</h4>
+          <div class="text-muted small">The server didn't recognise this key. Re-enter it below.</div>
+        </div>
+      {% elif state.status == 'unconfigured' %}
+        <i class="bi bi-key fs-1 text-muted"></i>
+        <div>
+          <h4 class="mb-0">No license key configured</h4>
+          <div class="text-muted small">Enter the key your reseller emailed you to activate Munshi.</div>
+        </div>
+      {% else %}
+        <i class="bi bi-wifi-off fs-1 text-muted"></i>
+        <div>
+          <h4 class="mb-0">Couldn't reach license server</h4>
+          <div class="text-muted small">Will retry automatically. Your data is safe.</div>
+        </div>
+      {% endif %}
+    </div>
+
+    <table class="table table-sm small">
+      <tr><th class="text-muted" style="width:200px">License key</th>
+          <td><code>{{ state.license_key or '—' }}</code></td></tr>
+      <tr><th class="text-muted">Tier</th>
+          <td>{{ state.tier or '—' }}{% if state.max_trucks %} (up to {{ state.max_trucks }} trucks){% endif %}</td></tr>
+      <tr><th class="text-muted">Expires on</th>
+          <td>{{ state.expires_at[:10] if state.expires_at else '—' }}
+            {% if state.days_to_expiry is not none and state.days_to_expiry is defined %}
+              <small class="text-muted">
+                ({% if state.days_to_expiry >= 0 %}in {{ state.days_to_expiry }} days{% else %}{{ -state.days_to_expiry }} days overdue{% endif %})
+              </small>
+            {% endif %}
+          </td></tr>
+      <tr><th class="text-muted">Last checked</th>
+          <td>{{ state.last_checked_at[:19].replace('T',' ') if state.last_checked_at else 'never' }}</td></tr>
+      {% if state.last_error %}
+      <tr><th class="text-muted">Last error</th>
+          <td class="text-danger small">{{ state.last_error }}</td></tr>
+      {% endif %}
+      <tr><th class="text-muted">License server</th>
+          <td><code>{{ server_url or '(not configured — env: LICENSE_SERVER_URL)' }}</code></td></tr>
+    </table>
+
+    <form method="post" action="{{ url_for('license_check_now') }}" class="d-inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="btn btn-sm btn-outline-primary">
+        <i class="bi bi-arrow-clockwise me-1"></i>Re-check now
+      </button>
+    </form>
+  </div>
+</div>
+
+{# ── Key entry / change ── #}
+{% if is_admin %}
+<div class="jl-card mb-3">
+  <div class="px-4 py-3 border-bottom" style="border-color: var(--jl-divider)!important">
+    <h5 class="mb-0"><i class="bi bi-key me-2"></i>Update license key</h5>
+  </div>
+  <form method="post" action="{{ url_for('license_set') }}" class="px-4 py-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-8">
+        <label class="form-label small fw-semibold">License key</label>
+        <input type="text" name="license_key" class="form-control" required
+               style="font-family: monospace; text-transform: uppercase"
+               placeholder="MUNSHI-XXXX-XXXX-XXXX-XXXX"
+               value="{{ configured_key }}">
+        <div class="form-text">Paste the key your reseller emailed. Format: <code>MUNSHI-XXXX-XXXX-XXXX-XXXX</code>.</div>
+      </div>
+      <div class="col-md-4">
+        <button class="btn btn-primary w-100">
+          <i class="bi bi-check-circle me-1"></i>Save & verify
+        </button>
+      </div>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+<div class="jl-card">
+  <div class="px-4 py-3 small text-muted">
+    <strong>How licensing works:</strong> Munshi phones the license server once a day to confirm your subscription is current.
+    Your data <em>never</em> leaves your laptop — only the license key and a truck count are sent.
+    If renewal is overdue, you'll see a yellow banner for 14 days (grace period), then the app goes read-only until renewed.
+    Your data is never deleted.
+  </div>
+</div>
+
+{% endblock %}

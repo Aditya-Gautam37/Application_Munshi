@@ -1,0 +1,30 @@
+# Production pins. Floor = the version currently installed & tested in .venv;
+# ceiling = the next MAJOR (blocks breaking changes) unless the package's release
+# habits need a tighter cap. `pip install -r` still resolves to the installed set.
+
+# Web framework — SemVer; 4.0 will drop deprecated APIs. Flask pins a compatible
+# Werkzeug/Jinja2 itself, so those stay unpinned here.
+Flask>=3.1.3,<4
+
+# .env loader — post-1.0, SemVer, stable.
+python-dotenv>=1.2.2,<2
+
+# Google Gemini SDK — fast-moving; breaking changes land even in MINOR bumps.
+# Old rule `>=0.5.0` spanned the entire 0.x→2.x rewrite and would silently jump
+# across incompatible API generations. Pinned to the installed minor.
+google-genai>=2.11.0,<2.12
+
+# Google OAuth flow helper — post-1.0, SemVer.
+google-auth-oauthlib>=1.4.0,<2
+
+# Google API client — stable 2.x line, SemVer.
+google-api-python-client>=2.198.0,<3
+
+# PDF rendering (invoices / OCR pre-processing) — stable 1.x line.
+pymupdf>=1.28.0,<2
+
+# Imaging — yearly SemVer major that removes deprecated APIs.
+Pillow>=12.3.0,<13
+
+# XLSX export — SemVer, stable 3.x.
+openpyxl>=3.1.5,<4

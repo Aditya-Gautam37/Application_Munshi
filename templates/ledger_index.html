@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty, pod_pill, paid_pill %}
+{% block title %}Ledger — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header(
+    t('Ledger'),
+    t('Daily Bill Register — every trip\'s freight, advances, diesel and balance'),
+    '<a href="' ~ url_for('ledger_extract_upload') ~ '" class="btn btn-warning"><i class="bi bi-camera me-1"></i>' ~ t('Extract from Photo') ~ '</a>'
+    ~ '<a href="' ~ url_for('ledger_new') ~ '" class="btn btn-success"><i class="bi bi-plus-circle me-1"></i>' ~ t('New Entry') ~ '</a>'
+) }}
+
+<div>
+  </div>
+
+  <!-- Filters -->
+  <form method="get" class="card mb-3">
+    <div class="card-body py-2">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label small">{{ t('Search GR / Vehicle / Station') }}</label>
+          <input type="text" name="q" class="form-control form-control-sm"
+                 value="{{ filters.q or '' }}" placeholder="e.g. UP78 or 13834 or BINDKI">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">{{ t('From') }}</label>
+          <input type="date" name="from" class="form-control form-control-sm" value="{{ filters.from or '' }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">{{ t('To') }}</label>
+          <input type="date" name="to" class="form-control form-control-sm" value="{{ filters.to or '' }}">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small">{{ t('Status') }}</label>
+          <select name="status" class="form-select form-select-sm">
+            <option value="">{{ t('All') }}</option>
+            <option value="pod_pending"  {{ 'selected' if filters.status == 'pod_pending' }}>{{ t('POD pending') }}</option>
+            <option value="unpaid"       {{ 'selected' if filters.status == 'unpaid' }}>{{ t('Unpaid') }}</option>
+            <option value="paid"         {{ 'selected' if filters.status == 'paid' }}>{{ t('Paid') }}</option>
+          </select>
+        </div>
+        <div class="col-md-2 text-end">
+          <button class="btn btn-primary btn-sm">{{ t('Filter') }}</button>
+          <a href="{{ url_for('ledger_index') }}" class="btn btn-outline-secondary btn-sm">{{ t('Clear') }}</a>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {% if entries %}
+  <div class="table-responsive">
+    <table class="table table-bordered table-sm align-middle small jl-mobile-cards" id="ledgerTable">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:32px"><input type="checkbox" id="ledgerSelectAll" title="Select all"></th>
+          <th>{{ t('Date') }}</th>
+          <th>{{ t('GR No.') }}</th>
+          <th>{{ t('Vehicle') }}</th>
+          <th>{{ t('Station') }}</th>
+          <th>{{ t('Shipment / Inv.') }}</th>
+          <th>{{ t('Trip') }}</th>
+          <th class="text-end">MT</th>
+          <th class="text-end">{{ t('Freight') }}</th>
+          <th class="text-end">{{ t('Adv. Cash') }}</th>
+          <th class="text-end">{{ t('Adv. A/c') }}</th>
+          <th class="text-end">{{ t('Diesel') }}</th>
+          <th class="text-end">{{ t('Balance') }}</th>
+          <th>POD</th>
+          <th>{{ t('Paid') }}</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr class="{{ 'table-danger' if e.overdue else ('table-success' if e.paid else '') }}" data-id="{{ e.id }}">
+          <td><input type="checkbox" class="ledger-row-check" value="{{ e.id }}"></td>
+          <td class="text-nowrap" data-label="Date">{{ e.entry_date | date }}</td>
+          <td data-label="GR No."><a href="{{ url_for('ledger_view', le_id=e.id) }}">{{ e.gr_no or e.id }}</a></td>
+          <td data-label="Vehicle">{{ e.vehicle_no or '' }}</td>
+          <td data-label="Station">{{ e.station or '' }}</td>
+          <td data-label="Shipment">{{ e.shipment_no or '' }}</td>
+          <td data-label="Trip"><span class="badge bg-secondary">{{ e.trip_type or 'OW' }}</span></td>
+          <td class="text-end" data-label="MT">{{ '{:,.2f}'.format(e.mt_qty) if e.mt_qty else '' }}</td>
+          <td class="text-end" data-label="Freight">{{ '{:,.0f}'.format(e.freight) if e.freight else '' }}</td>
+          <td class="text-end" data-label="Adv. Cash">{{ '{:,.0f}'.format(e.advance_cash) if e.advance_cash else '' }}</td>
+          <td class="text-end" data-label="Adv. A/c">{{ '{:,.0f}'.format(e.advance_account) if e.advance_account else '' }}</td>
+          <td class="text-end" data-label="Diesel">{{ '{:,.0f}'.format(e.diesel) if e.diesel else '' }}</td>
+          <td class="text-end fw-bold" data-label="Balance">{{ '{:,.0f}'.format(e.balance) if e.balance else '0' }}</td>
+          <td data-label="POD">
+            {% if e.pod_received %}
+              <div class="d-flex gap-1 align-items-center">
+                <form method="post" action="{{ url_for('ledger_pod', le_id=e.id) }}" class="d-inline"
+                      onsubmit="return confirm('Undo POD-received for GR {{ e.gr_no }}?')">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <button class="btn btn-sm btn-success py-0 px-2"
+                          title="Click to undo. POD received {{ e.pod_date }}">
+                    ✓ {{ e.pod_date | date if e.pod_date else 'received' }}
+                  </button>
+                </form>
+                {% if e.pod_image %}
+                  <a href="{{ url_for('serve_upload', filename=e.pod_image) }}" target="_blank"
+                     class="btn btn-sm btn-outline-success py-0 px-1" title="View POD photo">
+                    <i class="bi bi-image"></i>
+                  </a>
+                {% else %}
+                  <form method="post" action="{{ url_for('ledger_pod', le_id=e.id) }}"
+                        enctype="multipart/form-data" class="d-inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="pod_received" value="1">
+                    <input type="hidden" name="pod_date" value="{{ e.pod_date or '' }}">
+                    <label class="btn btn-sm btn-outline-success py-0 px-1 mb-0" title="Add POD photo">
+                      <i class="bi bi-camera"></i>
+                      <input type="file" name="pod_image" class="d-none"
+                             accept="image/*,.pdf,.heic" capture="environment"
+                             onchange="this.form.submit()">
+                    </label>
+                  </form>
+                {% endif %}
+              </div>
+            {% else %}
+              <form method="post" action="{{ url_for('ledger_pod', le_id=e.id) }}"
+                    enctype="multipart/form-data" class="d-inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="pod_received" value="1">
+                <div class="btn-group btn-group-sm" role="group">
+                  <button type="submit" class="btn {{ 'btn-danger' if e.overdue else 'btn-warning text-dark' }} py-0 px-2"
+                          title="Mark POD received (today, no photo)">
+                    {% if e.overdue %}⚠ Mark POD{% else %}Mark POD{% endif %}
+                  </button>
+                  <label class="btn {{ 'btn-outline-danger' if e.overdue else 'btn-outline-warning' }} py-0 px-1 mb-0"
+                         title="Mark POD with photo (one tap)">
+                    <i class="bi bi-camera"></i>
+                    <input type="file" name="pod_image" class="d-none"
+                           accept="image/*,.pdf,.heic" capture="environment"
+                           onchange="this.form.submit()">
+                  </label>
+                </div>
+              </form>
+            {% endif %}
+          </td>
+          <td data-label="Paid">{{ paid_pill(e.paid, e.paid_mode) }}</td>
+          <td class="text-center text-nowrap">
+            <a href="{{ url_for('ledger_view', le_id=e.id) }}" class="btn btn-sm btn-outline-primary"
+               title="Open"><i class="bi bi-pencil-square"></i></a>
+            <form method="post" action="{{ url_for('ledger_duplicate', le_id=e.id) }}" class="d-inline"
+                  title="Duplicate this trip — copies vehicle, station, freight, advance, diesel">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="btn btn-sm btn-outline-secondary"
+                      onclick="return confirm('Create a new ledger entry copying this trip\\'s vehicle, station, freight and advances? The new entry will have today\\'s date and a blank GR No.')">
+                <i class="bi bi-files"></i>
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="text-muted small">
+    {{ entries|length }} row{{ '' if entries|length == 1 else 's' }} ·
+    Red = no POD after {{ overdue_days }} days · Green = paid in full ·
+    Tip: select rows with the checkboxes for bulk actions.
+  </p>
+
+  {# ── Sticky bulk-action bar (shown only when ≥1 row selected) ── #}
+  <div id="bulkActionBar" class="jl-bulk-bar" style="display:none">
+    <div class="jl-bulk-bar-inner">
+      <span class="me-3"><strong id="bulkCount">0</strong> selected</span>
+
+      <form method="post" action="{{ url_for('ledger_bulk_pod') }}" class="d-inline me-2 bulk-form"
+            onsubmit="return confirm('Mark POD received for the selected entries (today\\'s date, no photos)?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="ids" id="bulkPodIds">
+        <button type="submit" class="btn btn-sm btn-warning text-dark">
+          <i class="bi bi-check-circle me-1"></i>Mark POD
+        </button>
+      </form>
+
+      <form method="post" action="{{ url_for('ledger_bulk_paid') }}" class="d-inline me-2 bulk-form"
+            onsubmit="return confirm('Mark the selected entries as fully paid (today\\'s date)?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="ids" id="bulkPaidIds">
+        <input type="hidden" name="mode" value="Cash">
+        <button type="submit" class="btn btn-sm btn-success">
+          <i class="bi bi-cash me-1"></i>Mark Paid (Cash)
+        </button>
+      </form>
+
+      <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="bulkClear">
+        <i class="bi bi-x-lg me-1"></i>Clear
+      </button>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const all = document.getElementById('ledgerSelectAll');
+      const rows = document.querySelectorAll('.ledger-row-check');
+      const bar = document.getElementById('bulkActionBar');
+      const cntEl = document.getElementById('bulkCount');
+      const podHidden = document.getElementById('bulkPodIds');
+      const paidHidden = document.getElementById('bulkPaidIds');
+      const clearBtn = document.getElementById('bulkClear');
+      if (!all || rows.length === 0) return;
+
+      function update() {
+        const ids = [...rows].filter(c => c.checked).map(c => c.value);
+        const n = ids.length;
+        cntEl.textContent = n;
+        bar.style.display = n > 0 ? '' : 'none';
+        podHidden.value = ids.join(',');
+        paidHidden.value = ids.join(',');
+        all.checked = (n === rows.length);
+        all.indeterminate = (n > 0 && n < rows.length);
+      }
+      all.addEventListener('change', () => {
+        rows.forEach(c => c.checked = all.checked);
+        update();
+      });
+      rows.forEach(c => c.addEventListener('change', update));
+      clearBtn.addEventListener('click', () => {
+        rows.forEach(c => c.checked = false);
+        update();
+      });
+      update();
+    })();
+  </script>
+  {% else %}
+  <div class="jl-card">
+    {{ empty(
+      'No ledger entries yet',
+      'Each truck dispatch has a ledger row that tracks freight, advances, diesel and the balance. Create one manually, or upload a photo of your handwritten ledger page.',
+      'bi-journal-text', 'Create first entry', url_for('ledger_new')
+    ) }}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

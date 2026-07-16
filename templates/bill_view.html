@@ -1,0 +1,350 @@
+{% extends "base.html" %}
+{% block title %}{{ bill.bill_no }} — Munshi{% endblock %}
+{% block content %}
+
+<!-- Screen actions bar -->
+<div class="no-print px-4 py-2 d-flex flex-wrap gap-2 align-items-center border-bottom mb-3">
+  <button onclick="window.print()" class="btn btn-primary btn-sm">
+    <i class="bi bi-printer me-1"></i>Print / Save PDF
+  </button>
+  <a href="{{ url_for('edit_bill', bill_id=bill.id) }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-pencil me-1"></i>Edit
+  </a>
+  {# WhatsApp share — opens wa.me with pre-filled message containing bill no + amount #}
+  {% set wa_text = 'Bill ' ~ bill.bill_no ~ ' for ' ~ (bill.recipient_name or '') ~ ' — ₹' ~ '{:,.2f}'.format(bill.total_amount or 0) ~ '. View: ' ~ request.url %}
+  <a href="https://wa.me/?text={{ wa_text|urlencode }}" target="_blank"
+     class="btn btn-success btn-sm" title="Share this bill via WhatsApp">
+    <i class="bi bi-whatsapp me-1"></i>Share on WhatsApp
+  </a>
+  <a href="{{ url_for('bill_einvoice_json', bill_id=bill.id) }}"
+     class="btn btn-outline-warning btn-sm"
+     title="Download GSTN e-invoice JSON for IRP upload">
+    <i class="bi bi-filetype-json me-1"></i>e-Invoice JSON
+  </a>
+  <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>Back
+  </a>
+  {% if bill.ledger_entry_id %}
+    <a href="{{ url_for('ledger_view', le_id=bill.ledger_entry_id) }}"
+       class="btn btn-outline-info btn-sm" title="Linked ledger entry">
+      <i class="bi bi-journal-text me-1"></i>Ledger ↗
+    </a>
+  {% endif %}
+
+  <!-- Client payment status -->
+  <div class="ms-auto d-flex align-items-center gap-2">
+    {% if bill.client_paid %}
+      <span class="badge bg-success">
+        ✓ Client paid {{ bill.client_paid_date | date if bill.client_paid_date else '' }}
+        {% if bill.client_paid_mode %} · {{ bill.client_paid_mode }}{% endif %}
+      </span>
+      <form method="post" action="{{ url_for('bill_client_paid', bill_id=bill.id) }}"
+            class="d-inline" onsubmit="return confirm('Mark this bill as unpaid by client?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-sm btn-outline-secondary">Undo</button>
+      </form>
+    {% else %}
+      <button class="btn btn-success btn-sm" data-bs-toggle="collapse" data-bs-target="#clientPaidForm">
+        <i class="bi bi-cash-stack me-1"></i>Mark Client Paid
+      </button>
+    {% endif %}
+  </div>
+</div>
+
+{% if not bill.client_paid %}
+<div class="no-print px-4 collapse" id="clientPaidForm">
+  <form method="post" action="{{ url_for('bill_client_paid', bill_id=bill.id) }}"
+        class="card card-body bg-light mb-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="client_paid" value="1">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-2">
+        <label class="form-label small">Date</label>
+        <input type="date" name="client_paid_date" class="form-control form-control-sm">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">Mode (optional)</label>
+        <select name="client_paid_mode" class="form-select form-select-sm">
+          <option value="">—</option>
+          <option>UPI</option><option>Bank</option><option>Cash</option><option>Cheque</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">Amount (optional)</label>
+        <input type="number" step="any" name="client_paid_amount" class="form-control form-control-sm">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small">Reference (optional)</label>
+        <input type="text" name="client_paid_reference" class="form-control form-control-sm"
+               placeholder="UPI txn / Cheque no.">
+      </div>
+      <div class="col-md-3">
+        <button class="btn btn-success btn-sm">Save Payment</button>
+        <button type="button" class="btn btn-outline-secondary btn-sm"
+                data-bs-toggle="collapse" data-bs-target="#clientPaidForm">Cancel</button>
+      </div>
+    </div>
+    <small class="text-muted mt-2">Tip: leave amount/mode/ref blank to record only the date.</small>
+  </form>
+</div>
+{% endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════
+     PRINT-READY BILL  (A4 Landscape)
+═══════════════════════════════════════════════════════════════ -->
+<div class="bill-page" id="printBill">
+
+  <!-- Title -->
+  <div class="bill-title-bar">TAX INVOICE/INVOICE/BILL OF SUPPLY</div>
+
+  <!-- Company header — reads from Settings → Supplier Identity -->
+  <div class="bill-company-name">{{ supplier.name }}</div>
+  <div class="bill-company-addr">{{ supplier.address }}</div>
+  {% if supplier.gstin or supplier.phone %}
+  <div class="bill-company-addr" style="font-size:10px; margin-top:2px">
+    {% if supplier.gstin %}GSTIN: {{ supplier.gstin }}{% endif %}
+    {% if supplier.gstin and supplier.phone %} · {% endif %}
+    {% if supplier.phone %}Phone: {{ supplier.phone }}{% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Info section: recipient (left) + trip/bill details (right) -->
+  <table class="bill-info-table">
+    <tr>
+      <!-- LEFT: recipient -->
+      <td class="bill-info-left">
+        <table class="inner">
+          <tr>
+            <td class="lbl">NAME OF SERVICE RECEIPIENT</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.recipient_name }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">RECEIPIENT ADDERESS</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.recipient_address }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">RECEIPIENT GSTIN NO.</td>
+            <td class="sep">:</td>
+            <td class="val fw-bold">{{ bill.recipient_gstin }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">STATE CODE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.state_code }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">WHETHER TAX IS PAYABLE ON REVERSE CHARGE BASIS</td>
+            <td class="sep">:</td>
+            <td class="val fw-bold">{{ 'YES' if bill.reverse_charge else 'NO' }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">DESCRIPTION OF SERVICE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ supplier.description_of_service }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">SAC / HSN CODE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.hsn_sac or supplier.sac_code }}</td>
+          </tr>
+        </table>
+      </td>
+
+      <!-- RIGHT: trip + bill info -->
+      <td class="bill-info-right">
+        <table class="inner">
+          <tr>
+            <td class="lbl">TRIP TYPE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.trip_type }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">VEHICLE NO.</td>
+            <td class="sep">:</td>
+            <td class="val fw-bold">{{ bill.vehicle_no }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">VEHICLE TYPE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ vehicle_type }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">FREIGHT TYPE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ freight_type }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">DELIVERY MONTH</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.delivery_month }}</td>
+          </tr>
+          <tr class="bill-info-divider"><td colspan="3"></td></tr>
+          <tr>
+            <td class="lbl">TRANSPORTER PAN</td>
+            <td class="sep">:</td>
+            <td class="val fw-bold">{{ supplier.pan }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">TRANSPORTER GSTIN NO.</td>
+            <td class="sep">:</td>
+            <td class="val">{{ supplier.gstin }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">BILL NO.</td>
+            <td class="sep">:</td>
+            <td class="val fw-bold">{{ bill.bill_no }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">BILL DATE</td>
+            <td class="sep">:</td>
+            <td class="val">{{ bill.bill_date | date }}</td>
+          </tr>
+          <tr>
+            <td class="lbl">PLACE OF SUPPLY</td>
+            <td class="sep">:</td>
+            <td class="val fw-bold">
+              {% if bill.place_of_supply %}{{ bill.place_of_supply }} — {{ gst_state_name(bill.place_of_supply) }}
+              {% else %}{{ supplier.place_of_supply }}{% endif %}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <!-- Delivery table -->
+  <table class="bill-delivery-table">
+    <thead>
+      <tr>
+        <th rowspan="2" class="th-sr">SR.<br>NO.</th>
+        <th rowspan="2" class="th-gr">GR NO.</th>
+        <th colspan="2" class="th-group">OUTWARD DELIVERY</th>
+        <th colspan="2" class="th-group">INWARD DELIVERY</th>
+        <th rowspan="2" class="th-loc">LOCATION /<br>ROUTE</th>
+        <th rowspan="2" class="th-cons">CONSIGNEE NAME</th>
+        <th rowspan="2" class="th-qty">DELIVERY<br>QTY.</th>
+        <th rowspan="2" class="th-qty">CONVERTED<br>CASE</th>
+        <th rowspan="2" class="th-qty">INWARD<br>QTY.</th>
+        <th rowspan="2" class="th-wt">WEIGHT</th>
+        <th rowspan="2" class="th-fr">FREIGHT<br>RATE</th>
+        <th rowspan="2" class="th-num">OVER<br>LOAD</th>
+        <th rowspan="2" class="th-num">TOLL<br>TAX</th>
+        <th rowspan="2" class="th-num">EXCESS<br>KM</th>
+        <th rowspan="2" class="th-num">DETENTION</th>
+        <th rowspan="2" class="th-num">UN<br>LOADING</th>
+        <th rowspan="2" class="th-vos">VALUE OF<br>SUPPLY</th>
+      </tr>
+      <tr>
+        <th class="th-sub">NO.</th>
+        <th class="th-sub">DATE</th>
+        <th class="th-sub">NO.</th>
+        <th class="th-sub">DATE</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in bill.deliveries %}
+      <tr class="delivery-row">
+        <td class="text-center">{{ d.sr_no }}</td>
+        <td>{{ d.gr_no }}</td>
+        <td>{{ d.outward_no }}</td>
+        <td class="text-center">{{ d.outward_date | date }}</td>
+        <td>{{ d.inward_no }}</td>
+        <td class="text-center">{{ d.inward_date | date }}</td>
+        <td>{{ d.location }}</td>
+        <td>{{ d.consignee }}</td>
+        <td class="text-center">{{ d.delivery_qty | inr }}</td>
+        <td class="text-center">{{ d.converted_case | inr }}</td>
+        <td class="text-center">{{ d.inward_qty | inr }}</td>
+        <td class="text-right">{{ d.weight | inr }}</td>
+        <td class="text-right">{{ d.freight_rate | inr }}</td>
+        <td class="text-right">{{ d.overload | inr }}</td>
+        <td class="text-right">{{ d.toll_tax | inr }}</td>
+        <td class="text-right">{{ d.excess_km | inr }}</td>
+        <td class="text-right">{{ d.detention | inr }}</td>
+        <td class="text-right">{{ d.unloading | inr }}</td>
+        <td class="text-right vos-cell">{{ d.value_of_supply | inr }}</td>
+      </tr>
+      {% endfor %}
+      <!-- Empty rows to pad to 5 -->
+      {% for _ in range(5 - bill.deliveries|length) %}
+      <tr class="delivery-row empty-row">
+        {% for _ in range(19) %}<td>&nbsp;</td>{% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- Footer -->
+  <table class="bill-footer-table">
+    <tr>
+      <td class="footer-notes">
+        {% if bill.reverse_charge %}
+          <div class="tax-note-1">TAX IS PAYABLE UNDER REVERSE CHARGE MECHANISM BY {{ bill.client_name }} ------&gt;</div>
+          <div class="tax-note-2">
+            RATE OF TAX ON ROAD TRANSPORTATION SERVICE IS CGST 2.5% &amp; SGST 2.5% OR IN CASE OF INTER STATE SUPPLY THEN IGST IS 5%
+          </div>
+        {% else %}
+          <div class="tax-note-1">FORWARD-CHARGE GST INVOICE — TAX COLLECTED BY {{ supplier.name or 'TRANSPORTER' }}</div>
+          <div class="tax-note-2">
+            HSN/SAC: {{ bill.hsn_sac or '996511' }} ·
+            {% if bill.igst_amount %}IGST {{ '%g'|format(bill.igst_pct) }}%{% endif %}
+            {% if bill.cgst_amount %}CGST {{ '%g'|format(bill.cgst_pct) }}% + SGST {{ '%g'|format(bill.sgst_pct) }}%{% endif %}
+          </div>
+        {% endif %}
+
+        {# Amount in words — required on every GST invoice in India. Rounded to whole rupees. #}
+        <div class="amount-in-words" style="margin-top:8px; padding-top:6px; border-top:1px solid #555; font-size:11px">
+          <strong>Amount in Words:</strong> {{ amount_in_words((bill.total_amount or 0) | round) }}
+        </div>
+
+        {% if supplier.bank_name or supplier.bank_account %}
+        <div style="margin-top:8px; font-size:11px">
+          <strong>Bank details:</strong>
+          {% if supplier.bank_name %}{{ supplier.bank_name }}{% endif %}
+          {% if supplier.bank_account %} · A/c: {{ supplier.bank_account }}{% endif %}
+          {% if supplier.bank_ifsc %} · IFSC: {{ supplier.bank_ifsc }}{% endif %}
+        </div>
+        {% endif %}
+      </td>
+      <td class="footer-total-col">
+        <table class="total-inner">
+          <tr>
+            <td class="total-lbl">TAXABLE VALUE</td>
+            <td class="total-amt">{{ (bill.taxable_value or bill.total_amount) | inr0 }}</td>
+          </tr>
+          {% if not bill.reverse_charge and bill.igst_amount %}
+          <tr>
+            <td class="total-lbl">IGST {{ '%g'|format(bill.igst_pct) }}%</td>
+            <td class="total-amt">{{ bill.igst_amount | inr0 }}</td>
+          </tr>
+          {% endif %}
+          {% if not bill.reverse_charge and bill.cgst_amount %}
+          <tr>
+            <td class="total-lbl">CGST {{ '%g'|format(bill.cgst_pct) }}%</td>
+            <td class="total-amt">{{ bill.cgst_amount | inr0 }}</td>
+          </tr>
+          <tr>
+            <td class="total-lbl">SGST {{ '%g'|format(bill.sgst_pct) }}%</td>
+            <td class="total-amt">{{ bill.sgst_amount | inr0 }}</td>
+          </tr>
+          {% endif %}
+          <tr style="border-top:2px solid #000; font-weight:bold">
+            <td class="total-lbl">TOTAL AMOUNT</td>
+            <td class="total-amt">{{ bill.total_amount | inr0 }}</td>
+          </tr>
+        </table>
+        <div class="signatory-box">
+          <div class="signatory-label">AUTHORISED SIGNATORY<br>FOR {{ supplier.name|upper }}</div>
+        </div>
+      </td>
+    </tr>
+  </table>
+
+</div><!-- end bill-page -->
+
+<div class="container-fluid no-print px-4">
+  {% include '_activity_log.html' %}
+</div>
+{% endblock %}

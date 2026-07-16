@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+{% block title %}Ledger {{ entry.gr_no or 'New' }} — Munshi{% endblock %}
+{% block content %}
+
+<div class="container-fluid px-4 pb-5" style="max-width:1200px">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">
+      <i class="bi bi-journal-text me-1"></i>
+      {{ 'Edit Entry — GR ' + (entry.gr_no or '') if entry else 'New Ledger Entry' }}
+    </h5>
+    <div class="d-flex gap-2">
+      {% if entry and entry.challan_id %}
+        <a href="{{ url_for('challan_review', challan_id=entry.challan_id) }}"
+           class="btn btn-outline-info btn-sm" title="Linked challan">
+          <i class="bi bi-clipboard2-pulse me-1"></i>Challan ↗
+        </a>
+      {% endif %}
+      {% if entry and entry.bill_id %}
+        <a href="{{ url_for('view_bill', bill_id=entry.bill_id) }}"
+           class="btn btn-outline-success btn-sm" title="This entry is billed">
+          <i class="bi bi-receipt me-1"></i>Bill ↗
+        </a>
+      {% elif entry and entry.pod_received %}
+        <a href="{{ url_for('new_bill', from_ledger=entry.id) }}"
+           class="btn btn-success btn-sm">
+          <i class="bi bi-plus-circle me-1"></i>Create Bill from this entry
+        </a>
+      {% endif %}
+      <a href="{{ url_for('ledger_index') }}" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left"></i> Back to ledger
+      </a>
+    </div>
+  </div>
+
+  <!-- Trip + money form -->
+  <form method="post" action="{{ url_for('ledger_view', le_id=entry.id) if entry else url_for('ledger_new') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white fw-semibold">Trip</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-2">
+            <label class="form-label small">Date *</label>
+            <input type="date" name="entry_date" class="form-control form-control-sm" required
+                   value="{{ entry.entry_date or today }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">GR No. *</label>
+            <input type="text" name="gr_no" class="form-control form-control-sm" required
+                   value="{{ entry.gr_no or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Vehicle No. *</label>
+            <input type="text" name="vehicle_no" id="vehicleNoInput" class="form-control form-control-sm" required
+                   list="vehiclesList" autocomplete="off" style="text-transform:uppercase"
+                   value="{{ entry.vehicle_no or '' }}">
+            <datalist id="vehiclesList">
+              {% for v in vehicles %}<option value="{{ v }}">{% endfor %}
+            </datalist>
+          </div>
+
+          {# ── Smart-defaults suggestion banner (populated by JS after vehicle blur) ── #}
+          <div class="col-12" id="vehicleHintBox" style="display:none">
+            <div class="alert alert-info py-2 px-3 mb-0 d-flex align-items-center small">
+              <i class="bi bi-lightbulb me-2"></i>
+              <div class="flex-grow-1" id="vehicleHintText"></div>
+              <button type="button" class="btn btn-sm btn-primary me-1" id="vehicleHintApply">Apply</button>
+              <button type="button" class="btn btn-sm btn-link text-muted" id="vehicleHintDismiss" aria-label="Dismiss">×</button>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Station / Destination</label>
+            <input type="text" name="station" class="form-control form-control-sm"
+                   value="{{ entry.station or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Shipment / Inv. No.</label>
+            <input type="text" name="shipment_no" class="form-control form-control-sm"
+                   value="{{ entry.shipment_no or '' }}">
+          </div>
+          <div class="col-md-1">
+            <label class="form-label small">Trip</label>
+            <select name="trip_type" class="form-select form-select-sm">
+              <option {{ 'selected' if (entry and entry.trip_type == 'One Way') or not entry }}>One Way</option>
+              <option {{ 'selected' if (entry and entry.trip_type == 'Two Way') }}>Two Way</option>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">MT Qty</label>
+            <input type="number" name="mt_qty" step="any" class="form-control form-control-sm"
+                   value="{{ entry.mt_qty or '' }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small">Transporter (vehicle owner)</label>
+            <select name="transporter_id" class="form-select form-select-sm">
+              <option value="">-- pick or add in Masters --</option>
+              {% for t in transporters %}
+              <option value="{{ t.id }}" {{ 'selected' if entry and entry.transporter_id == t.id }}>{{ t.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-7">
+            <label class="form-label small">Remarks</label>
+            <input type="text" name="remarks" class="form-control form-control-sm"
+                   value="{{ entry.remarks or '' }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Money -->
+    <div class="card mb-3">
+      <div class="card-header bg-dark text-white fw-semibold">Money</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-2">
+            <label class="form-label small">Freight (₹) *</label>
+            <input type="number" id="f_freight" name="freight" step="any" class="form-control form-control-sm money"
+                   value="{{ entry.freight or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Advance Cash (driver)</label>
+            <input type="number" id="f_cash" name="advance_cash" step="any" class="form-control form-control-sm money"
+                   value="{{ entry.advance_cash or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Advance to A/c (owner)</label>
+            <input type="number" id="f_acct" name="advance_account" step="any" class="form-control form-control-sm money"
+                   value="{{ entry.advance_account or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Diesel (₹)</label>
+            <input type="number" id="f_diesel" name="diesel" step="any" class="form-control form-control-sm money"
+                   value="{{ entry.diesel or '' }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Diesel Vendor</label>
+            <select name="diesel_vendor_id" class="form-select form-select-sm">
+              <option value="">--</option>
+              {% for v in diesel_vendors %}
+              <option value="{{ v.id }}" {{ 'selected' if entry and entry.diesel_vendor_id == v.id }}>{{ v.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small fw-bold">Balance owed</label>
+            <input type="text" id="f_balance" class="form-control form-control-sm fw-bold bg-light" readonly>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="d-flex gap-2">
+      <button class="btn btn-primary"><i class="bi bi-save me-1"></i>{{ 'Update' if entry else 'Save Entry' }}</button>
+      <a href="{{ url_for('ledger_index') }}" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+
+  {% if entry %}
+  <!-- Delete is a SEPARATE form (cannot be nested inside the main edit form above) -->
+  <form method="post" action="{{ url_for('ledger_delete', le_id=entry.id) }}"
+        class="d-inline-block mt-2"
+        onsubmit="return confirm('Delete this ledger entry permanently?')">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn btn-outline-danger btn-sm">
+      <i class="bi bi-trash me-1"></i>Delete this entry
+    </button>
+  </form>
+  {% endif %}
+
+  {% if entry %}
+  <hr class="my-4">
+
+  <div class="row g-3">
+    <!-- POD -->
+    <div class="col-md-6">
+      <div class="card h-100">
+        <div class="card-header bg-warning-subtle fw-semibold">
+          <i class="bi bi-camera me-1"></i>Proof of Delivery (POD)
+        </div>
+        <div class="card-body">
+          <form method="post" action="{{ url_for('ledger_pod', le_id=entry.id) }}" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="pod_received" name="pod_received" value="1"
+                     {{ 'checked' if entry.pod_received }}>
+              <label class="form-check-label fw-semibold" for="pod_received">POD received</label>
+            </div>
+            <div class="row g-2 align-items-end">
+              <div class="col-md-5">
+                <label class="form-label small">POD Date</label>
+                <input type="date" name="pod_date" class="form-control form-control-sm"
+                       value="{{ entry.pod_date or today }}">
+              </div>
+              <div class="col-md-7">
+                <label class="form-label small">POD photo (optional)</label>
+                <input type="file" name="pod_image" class="form-control form-control-sm"
+                       accept=".jpg,.jpeg,.png,.pdf,.webp">
+              </div>
+            </div>
+
+            {% if entry.pod_image %}
+              <div class="mt-3">
+                <small class="text-muted d-block mb-1">Current POD:</small>
+                <a href="{{ url_for('serve_upload', filename=entry.pod_image) }}" target="_blank">
+                  {% if entry.pod_image.lower().endswith('.pdf') %}
+                    <span class="badge bg-secondary"><i class="bi bi-file-pdf me-1"></i>{{ entry.pod_image }}</span>
+                  {% else %}
+                    <img src="{{ url_for('serve_upload', filename=entry.pod_image) }}"
+                         class="img-thumbnail" style="max-height:120px">
+                  {% endif %}
+                </a>
+              </div>
+            {% endif %}
+
+            <button class="btn btn-warning btn-sm mt-3"><i class="bi bi-check2 me-1"></i>Save POD</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mark Paid -->
+    <div class="col-md-6">
+      <div class="card h-100">
+        <div class="card-header bg-info-subtle fw-semibold">
+          <i class="bi bi-cash-stack me-1"></i>Payment to Transporter
+        </div>
+        <div class="card-body">
+          <form method="post" action="{{ url_for('ledger_paid', le_id=entry.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="paid" name="paid" value="1"
+                     {{ 'checked' if entry.paid }}>
+              <label class="form-check-label fw-semibold" for="paid">Marked paid</label>
+            </div>
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label small">Date</label>
+                <input type="date" name="paid_date" class="form-control form-control-sm"
+                       value="{{ entry.paid_date or today }}">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label small">Mode (optional)</label>
+                <select name="paid_mode" class="form-select form-select-sm">
+                  {% for m in ['', 'Cash', 'UPI', 'Bank', 'Cheque'] %}
+                  <option value="{{ m }}" {{ 'selected' if entry.paid_mode == m }}>{{ m or '—' }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label small">Amount (optional)</label>
+                <input type="number" name="paid_amount" step="any" class="form-control form-control-sm"
+                       value="{{ entry.paid_amount or '' }}">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label small">Reference (optional)</label>
+                <input type="text" name="paid_reference" class="form-control form-control-sm"
+                       value="{{ entry.paid_reference or '' }}" placeholder="UPI txn / Cheque no.">
+              </div>
+            </div>
+            <button class="btn btn-info btn-sm mt-3"><i class="bi bi-check2 me-1"></i>Save Payment</button>
+            <small class="text-muted d-block mt-2">
+              Tip: leave amount/mode/ref blank to record only the date — that's the quick path.
+            </small>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% include '_activity_log.html' %}
+</div>
+
+<script>
+function recalcBalance() {
+  const num = sel => parseFloat(document.getElementById(sel)?.value || 0) || 0;
+  const bal = num('f_freight') - num('f_cash') - num('f_acct') - num('f_diesel');
+  const out = document.getElementById('f_balance');
+  if (out) out.value = bal.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+document.querySelectorAll('.money').forEach(el => el.addEventListener('input', recalcBalance));
+document.addEventListener('DOMContentLoaded', recalcBalance);
+
+// ── Smart defaults: when vehicle field blurs, fetch last-trip data and offer to apply ──
+(function() {
+  const inp = document.getElementById('vehicleNoInput');
+  const box = document.getElementById('vehicleHintBox');
+  const txt = document.getElementById('vehicleHintText');
+  const applyBtn = document.getElementById('vehicleHintApply');
+  const dismissBtn = document.getElementById('vehicleHintDismiss');
+  if (!inp || !box) return;
+
+  let pending = null;  // last fetched suggestion
+
+  function setVal(name, value) {
+    if (value === null || value === undefined || value === '') return;
+    const el = document.querySelector(`[name="${name}"]`);
+    if (!el) return;
+    if (!el.value || el.value === '0' || el.value === '0.00') {
+      el.value = value;
+    }
+  }
+
+  function show(data) {
+    pending = data;
+    const station = data.frequent_station || data.station || '—';
+    const freight = data.freight ? '₹' + Number(data.freight).toLocaleString('en-IN') : '—';
+    const consignee = data.last_consignee ? ' · ' + data.last_consignee : '';
+    txt.innerHTML = `Last trip with this vehicle: <strong>${station}</strong> · freight ${freight}${consignee}. Apply these defaults?`;
+    box.style.display = '';
+  }
+  function hide() { box.style.display = 'none'; pending = null; }
+
+  inp.addEventListener('blur', async () => {
+    const v = (inp.value || '').trim().toUpperCase().replace(/\s+/g, '');
+    if (v.length < 4) { hide(); return; }
+    // Don't suggest when editing an existing entry (already has values)
+    if (document.querySelector('[name="freight"]')?.value &&
+        document.querySelector('[name="freight"]')?.value !== '0') return;
+    try {
+      const r = await fetch('/api/vehicle-history/' + encodeURIComponent(v));
+      const data = await r.json();
+      if (data.found) show(data);
+      else hide();
+    } catch (e) { hide(); }
+  });
+
+  applyBtn.addEventListener('click', () => {
+    if (!pending) return;
+    setVal('station', pending.frequent_station || pending.station);
+    setVal('freight', pending.freight);
+    setVal('advance_cash', pending.advance_cash);
+    setVal('advance_account', pending.advance_account);
+    setVal('diesel', pending.diesel);
+    setVal('mt_qty', pending.mt_qty);
+    setVal('trip_type', pending.trip_type);
+    setVal('transporter_id', pending.transporter_id);
+    setVal('shipment_no', pending.last_invoice);
+    recalcBalance();
+    hide();
+  });
+  dismissBtn.addEventListener('click', hide);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty, pill %}
+{% block title %}Ready to Bill — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header(
+    'Ready to Bill',
+    'POD received, not yet billed — one click to convert',
+    '<a href="' ~ url_for('ledger_index') ~ '" class="btn btn-outline-secondary"><i class="bi bi-journal-text me-1"></i>Full ledger</a>'
+) }}
+
+{% if entries %}
+<div class="jl-card">
+<div class="table-responsive">
+  <table class="table table-hover align-middle small mb-0">
+    <thead class="table-light">
+      <tr>
+        <th>Date</th>
+        <th>GR No.</th>
+        <th>Vehicle</th>
+        <th>Station</th>
+        <th>Consignee</th>
+        <th>Invoice No.</th>
+        <th class="text-end">Weight (kg)</th>
+        <th>POD</th>
+        <th class="text-center" style="width:140px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td class="text-nowrap">{{ e.entry_date | date }}</td>
+        <td><a href="{{ url_for('ledger_view', le_id=e.id) }}" class="fw-semibold">{{ e.gr_no or e.id }}</a></td>
+        <td>{{ e.vehicle_no or '' }}</td>
+        <td>{{ e.station or '' }}</td>
+        <td>{{ e.challan_consignee or e.remarks or '' }}</td>
+        <td>{{ e.challan_invoice or e.shipment_no or '' }}</td>
+        <td class="text-end">
+          {% if e.challan_weight %}{{ '{:,.2f}'.format(e.challan_weight) }}{% elif e.mt_qty %}{{ '{:,.2f}'.format(e.mt_qty * 1000) }}{% endif %}
+        </td>
+        <td>{{ pill('POD ✓ ' + (e.pod_date|date if e.pod_date else ''), 'success') }}</td>
+        <td class="text-center">
+          <a href="{{ url_for('new_bill', from_ledger=e.id) }}"
+             class="btn btn-sm btn-success">
+            <i class="bi bi-plus-circle me-1"></i>Create Bill
+          </a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+</div>
+
+<p class="text-muted small mt-2">
+  {{ entries|length }} entr{{ 'y' if entries|length == 1 else 'ies' }} ready to bill ·
+  Click "Create Bill" to open a pre-filled bill form (consignee, GR No., Invoice details, weight all populated from challan + ledger).
+</p>
+{% else %}
+<div class="jl-card">
+{{ empty(
+  'Nothing ready to bill yet',
+  'Mark POD received on a ledger entry and it will appear here. From here you can convert it into a bill in one click.',
+  'bi-receipt-cutoff', 'Open ledger', url_for('ledger_index')
+) }}
+</div>
+{% endif %}
+{% endblock %}

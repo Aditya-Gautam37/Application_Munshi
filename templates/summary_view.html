@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Summary — Munshi{% endblock %}
+{% block content %}
+
+<div class="no-print px-4 py-2 d-flex gap-2 align-items-center border-bottom mb-3">
+  <button onclick="window.print()" class="btn btn-primary btn-sm">
+    <i class="bi bi-printer me-1"></i>Print / Save PDF
+  </button>
+  <a href="{{ url_for('summary') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>Back
+  </a>
+  <span class="ms-2 text-muted small">Use browser Print → Save as PDF for a PDF file.</span>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     PRINT-READY SUMMARY  (A4 Landscape / Portrait auto)
+════════════════════════════════════════════════════════════ -->
+<div class="summary-page" id="printSummary">
+
+  <div class="summary-header">
+    <div class="summary-company">{{ supplier.name }}</div>
+    <div class="summary-title">DELIVERY BILL SUMMARY (DBR)</div>
+    {% if bills %}
+    <div class="summary-range">
+      Bills: {{ bills[0].bill_no }} to {{ bills[-1].bill_no }}
+      &nbsp;|&nbsp;
+      Date: {{ bills[0].bill_date | date }} to {{ bills[-1].bill_date | date }}
+    </div>
+    {% endif %}
+  </div>
+
+  <table class="summary-table">
+    <thead>
+      <tr>
+        <th>SR.<br>NO.</th>
+        <th>OUTWARD<br>DEL. NO.</th>
+        <th>OUTWARD<br>DATE</th>
+        <th>INWARD<br>DEL. NO.</th>
+        <th>INWARD<br>DATE</th>
+        <th>BILL NO.</th>
+        <th>DELIVERY<br>QTY.</th>
+        <th>EMPTY<br>QTY.</th>
+        <th>WEIGHT</th>
+        <th>FREIGHT<br>RATE</th>
+        <th>OVERLOAD</th>
+        <th>DETENTION</th>
+        <th>VALUE OF<br>SUPPLY</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set sr = namespace(n=0) %}
+      {% for bill in bills %}
+        {% for d in bill.deliveries %}
+          {% set sr.n = sr.n + 1 %}
+          <tr>
+            <td class="text-center">{{ sr.n }}</td>
+            <td>{{ d.outward_no }}</td>
+            <td class="text-center">{{ d.outward_date | date }}</td>
+            <td>{{ d.inward_no }}</td>
+            <td class="text-center">{{ d.inward_date | date }}</td>
+            <!-- Bill No. only on first delivery of each bill -->
+            <td class="text-center fw-bold">{{ bill.bill_no if loop.first else '' }}</td>
+            <td class="text-center">{{ d.delivery_qty }}</td>
+            <td class="text-center">{{ d.empty_qty }}</td>
+            <td class="text-right">{{ d.weight }}</td>
+            <td class="text-right">{{ d.freight_rate }}</td>
+            <td class="text-right">{{ d.overload }}</td>
+            <td class="text-right">{{ d.detention }}</td>
+            <td class="text-right summary-vos">{{ d.value_of_supply }}</td>
+          </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr class="summary-total-row">
+        <td colspan="12" class="text-right fw-bold">GRAND TOTAL</td>
+        <td class="text-right fw-bold summary-vos">{{ '{:,.2f}'.format(grand_total) }}</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <div class="summary-footer">
+    <div class="summary-signatory">
+      <div class="sig-line"></div>
+      <div>AUTHORISED SIGNATORY</div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

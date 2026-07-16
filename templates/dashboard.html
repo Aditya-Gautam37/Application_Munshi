@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% from '_components.html' import kpi, page_header, empty %}
+{% block title %}Dashboard — Munshi{% endblock %}
+{% block content %}
+
+{% macro money(v) %}₹{{ '{:,.0f}'.format(v or 0) }}{% endmacro %}
+
+{{ page_header(t('Dashboard'), t('Overview of operations, money and what needs attention')) }}
+
+<!-- ── Data Vault: is your data safely backed up on THIS laptop? ── -->
+{% set vault_bad = vault.stale or vault.error %}
+<div class="jl-card mb-4" style="border-left:4px solid {{ '#dc3545' if vault_bad else '#198754' }}">
+  <div class="jl-card-body">
+    <div class="jl-row" style="align-items:flex-start; gap:16px; flex-wrap:wrap; justify-content:space-between">
+      <div style="flex:1 1 320px">
+        <div class="jl-card-title">
+          <i class="bi {{ 'bi-shield-exclamation' if vault_bad else 'bi-shield-check' }} me-2"
+             style="color:{{ '#dc3545' if vault_bad else '#198754' }}"></i>
+          {{ t('Data Vault') }}
+        </div>
+        <div class="jl-card-subtitle" style="margin-top:6px">
+          {{ t('Your data is on THIS laptop only — nothing is sent online.') }}
+        </div>
+
+        {% if vault_bad %}
+          <div style="margin-top:12px; font-weight:700; color:#dc3545">
+            {% if vault.error %}
+              <i class="bi bi-x-octagon me-1"></i>{{ t('There was a backup problem — please check.') }}
+            {% elif vault.latest_dt %}
+              <i class="bi bi-exclamation-triangle me-1"></i>{{ t('No backup in the last') }} {{ vault.days_old }} {{ t('days — please check.') }}
+            {% else %}
+              <i class="bi bi-exclamation-triangle me-1"></i>{{ t('No backup has been taken yet — please check.') }}
+            {% endif %}
+          </div>
+          {% if vault.error %}
+            <div class="text-muted small" style="margin-top:4px">{{ t('Detail:') }} {{ vault.error }}</div>
+          {% endif %}
+        {% else %}
+          <div style="margin-top:12px; font-weight:700; color:#198754">
+            <i class="bi bi-check-circle me-1"></i>{{ t('Safe — last backup:') }}
+            {{ vault.latest_dt.strftime('%d %b %Y, %I:%M %p') if vault.latest_dt else '—' }}
+          </div>
+        {% endif %}
+      </div>
+
+      <div style="flex:0 0 auto; align-self:center">
+        <a href="{{ url_for('restore_page') }}" class="btn btn-outline-secondary btn-sm">
+          <i class="bi bi-arrow-counterclockwise me-1"></i>{{ t('Restore from backup') }}
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Last 7 days KPI strip ── -->
+<div class="jl-row mb-3" style="font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--jl-text-muted)">
+  {{ t('Last 7 days') }}
+</div>
+<div class="jl-kpi-grid">
+  {{ kpi(t('Trips dispatched'), kpis.trips_dispatched_week, t('last 7 days'), 'bi-truck',     'primary', url_for('challans_index')) }}
+  {{ kpi(t('Bills generated'),  kpis.bills_generated_week,  t('last 7 days'), 'bi-receipt',   'success', url_for('index')) }}
+  {{ kpi(t('Freight billed'),   money(kpis.freight_billed_week), t('last 30 days:') + ' ' + money(kpis.freight_billed_month), 'bi-graph-up', 'accent') }}
+  {{ kpi(t('Advances paid'),    money(kpis.advances_paid_week),  t('last 30 days:') + ' ' + money(kpis.advances_paid_month),  'bi-cash',     'warning') }}
+</div>
+
+<!-- ── Outstanding right now ── -->
+<div class="jl-row mb-3" style="font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--jl-text-muted)">
+  {{ t('Needs attention') }}
+</div>
+<div class="jl-kpi-grid">
+  {% set pod_meta = (kpis.pod_overdue_count|string) + ' ' + t('overdue (>') + (overdue_days|string) + 'd)' if kpis.pod_overdue_count > 0 else t('all within') + ' ' + (overdue_days|string) + ' ' + t('days') %}
+  {{ kpi(t('POD pending'), kpis.pod_pending_count, pod_meta,
+         'bi-exclamation-triangle',
+         'danger' if kpis.pod_overdue_count > 0 else 'warning',
+         url_for('ledger_index', status='pod_pending')) }}
+  {{ kpi(t('Ready to bill'), kpis.ready_to_bill_count, t('POD received · no bill yet'),
+         'bi-receipt-cutoff', 'success', url_for('ready_to_bill')) }}
+  {{ kpi(t('Owed to transporters'), money(kpis.transporter_balance_owed), t('unpaid trip balances'),
+         'bi-truck-flatbed', 'info', url_for('payments_hub')) }}
+  {{ kpi(t('Receivable from clients'), money(kpis.client_outstanding),
+         (kpis.client_outstanding_count|string) + ' ' + (t('unpaid bill') if kpis.client_outstanding_count == 1 else t('unpaid bills')),
+         'bi-cash-stack', 'accent', url_for('payments_hub')) }}
+</div>
+
+<!-- ── Recent activity + Reports shortcuts ── -->
+<div class="row g-3 mt-2">
+  <div class="col-lg-7">
+    <div class="jl-card">
+      <div class="jl-card-header">
+        <div>
+          <div class="jl-card-title"><i class="bi bi-clock-history me-2"></i>{{ t('Recent activity') }}</div>
+          <div class="jl-card-subtitle">{{ t('Latest challans & bills') }}</div>
+        </div>
+        <a href="{{ url_for('audit_log_view') }}" class="small">{{ t('Full activity log →') }}</a>
+      </div>
+      {% if recent %}
+        <ul class="list-group list-group-flush">
+          {% for r in recent %}
+          <li class="list-group-item d-flex justify-content-between align-items-center small py-3" style="border-color: var(--jl-divider)">
+            <span>
+              {% if r.kind == 'challan' %}
+                <i class="bi bi-clipboard2-pulse text-info me-2"></i>
+                <strong>Challan LR-{{ r.ref }}</strong>
+                <span class="text-muted">→ {{ r.detail or '' }}</span>
+              {% elif r.kind == 'bill' %}
+                <i class="bi bi-receipt text-success me-2"></i>
+                <strong>Bill {{ r.ref }}</strong>
+                <span class="text-muted">→ {{ r.detail or '' }}</span>
+              {% endif %}
+            </span>
+            <span class="text-muted">{{ r.dt | date if r.dt else '' }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        {{ empty(t('No activity yet'),
+                 t('Your first challan or bill will appear here. Click + Create at the top right to get started.'),
+                 'bi-activity') }}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="jl-card">
+      <div class="jl-card-header">
+        <div class="jl-card-title"><i class="bi bi-bar-chart me-2"></i>{{ t('Reports') }}</div>
+      </div>
+      <div class="list-group list-group-flush">
+        <a href="{{ url_for('report_diesel') }}" class="list-group-item list-group-item-action py-3" style="border-color: var(--jl-divider)">
+          <i class="bi bi-fuel-pump me-2 text-primary"></i>
+          <strong>{{ t('Diesel summary') }}</strong>
+          <small class="d-block text-muted ms-4">{{ t('By vendor + by vehicle, custom date range') }}</small>
+        </a>
+        <a href="{{ url_for('report_transporters') }}" class="list-group-item list-group-item-action py-3" style="border-color: var(--jl-divider)">
+          <i class="bi bi-truck-flatbed me-2 text-primary"></i>
+          <strong>{{ t('Per-transporter statement') }}</strong>
+          <small class="d-block text-muted ms-4">{{ t('Trips, advances, balance owed for each owner') }}</small>
+        </a>
+        <a href="{{ url_for('summary') }}" class="list-group-item list-group-item-action py-3" style="border-color: var(--jl-divider)">
+          <i class="bi bi-file-earmark-spreadsheet me-2 text-primary"></i>
+          <strong>{{ t('Bill summary (DBR)') }}</strong>
+          <small class="d-block text-muted ms-4">{{ t('Pick bills by date range to send to client') }}</small>
+        </a>
+        <a href="{{ url_for('payments_hub') }}" class="list-group-item list-group-item-action py-3" style="border: 0">
+          <i class="bi bi-cash-stack me-2 text-primary"></i>
+          <strong>{{ t('Payments hub') }}</strong>
+          <small class="d-block text-muted ms-4">{{ t('Receivables & payables ledger cards') }}</small>
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

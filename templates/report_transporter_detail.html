@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}{{ transporter.name }} — Transporter Statement{% endblock %}
+{% block content %}
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">
+      <i class="bi bi-truck-flatbed me-2"></i>{{ transporter.name }}
+      {% if transporter.mobile %}<small class="text-muted ms-2">{{ transporter.mobile }}</small>{% endif %}
+    </h5>
+    <div class="d-flex gap-2">
+      <button onclick="window.print()" class="btn btn-outline-primary btn-sm no-print">
+        <i class="bi bi-printer me-1"></i>Print / Save PDF
+      </button>
+      <a href="{{ url_for('report_transporters') }}" class="btn btn-outline-secondary btn-sm no-print">
+        <i class="bi bi-arrow-left"></i> Back to list
+      </a>
+    </div>
+  </div>
+
+  {% if transporter.bank_details %}
+    <p class="small text-muted mb-2"><strong>A/c:</strong> {{ transporter.bank_details }}</p>
+  {% endif %}
+
+  <form method="get" class="card mb-3 no-print">
+    <div class="card-body py-2">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label small">From (optional)</label>
+          <input type="date" name="from" class="form-control form-control-sm" value="{{ date_from }}">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">To (optional)</label>
+          <input type="date" name="to" class="form-control form-control-sm" value="{{ date_to }}">
+        </div>
+        <div class="col-md-4 text-end">
+          <button class="btn btn-primary btn-sm">Apply</button>
+          <a href="{{ url_for('report_transporter_detail', tid=transporter.id) }}"
+             class="btn btn-outline-secondary btn-sm">All time</a>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  <!-- ── Totals strip ── -->
+  <div class="row g-2 mb-3">
+    <div class="col-md-2"><div class="card border-0 bg-light"><div class="card-body py-2 small">
+      <div class="text-muted">Trips</div><div class="fw-bold fs-5">{{ entries|length }}</div>
+    </div></div></div>
+    <div class="col-md-2"><div class="card border-0 bg-light"><div class="card-body py-2 small">
+      <div class="text-muted">Freight</div><div class="fw-bold">{{ '{:,.0f}'.format(total_freight) }}</div>
+    </div></div></div>
+    <div class="col-md-2"><div class="card border-0 bg-light"><div class="card-body py-2 small">
+      <div class="text-muted">Cash adv.</div><div>{{ '{:,.0f}'.format(total_cash) }}</div>
+    </div></div></div>
+    <div class="col-md-2"><div class="card border-0 bg-light"><div class="card-body py-2 small">
+      <div class="text-muted">A/c adv.</div><div>{{ '{:,.0f}'.format(total_account) }}</div>
+    </div></div></div>
+    <div class="col-md-2"><div class="card border-0 bg-light"><div class="card-body py-2 small">
+      <div class="text-muted">Diesel</div><div>{{ '{:,.0f}'.format(total_diesel) }}</div>
+    </div></div></div>
+    <div class="col-md-2"><div class="card border-{{ 'danger' if balance_owed_total > 0 else 'success' }}">
+      <div class="card-body py-2 small">
+        <div class="text-muted">Balance owed</div>
+        <div class="fw-bold fs-5 {{ 'text-danger' if balance_owed_total > 0 else 'text-success' }}">
+          ₹{{ '{:,.0f}'.format(balance_owed_total) }}
+        </div>
+      </div>
+    </div></div>
+  </div>
+
+  {% if entries %}
+  <table class="table table-bordered table-sm small align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Date</th>
+        <th>GR No.</th>
+        <th>Vehicle</th>
+        <th>Station</th>
+        <th class="text-end">Freight</th>
+        <th class="text-end">Cash</th>
+        <th class="text-end">A/c</th>
+        <th class="text-end">Diesel</th>
+        <th class="text-end">Balance</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr class="{{ 'table-success' if e.paid else '' }}">
+        <td>{{ e.entry_date | date }}</td>
+        <td><a href="{{ url_for('ledger_view', le_id=e.id) }}">{{ e.gr_no or e.id }}</a></td>
+        <td>{{ e.vehicle_no or '' }}</td>
+        <td>{{ e.station or '' }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(e.freight or 0) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(e.advance_cash or 0) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(e.advance_account or 0) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(e.diesel or 0) }}</td>
+        <td class="text-end fw-bold">{{ '{:,.0f}'.format(e.balance) }}</td>
+        <td>
+          {% if e.paid %}
+            <span class="badge bg-success">paid {{ e.paid_date | date if e.paid_date else '' }}</span>
+          {% else %}
+            <span class="badge bg-warning text-dark">unpaid</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      <tr class="table-active fw-bold">
+        <td colspan="4">Totals</td>
+        <td class="text-end">{{ '{:,.0f}'.format(total_freight) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(total_cash) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(total_account) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(total_diesel) }}</td>
+        <td class="text-end {{ 'text-danger' if balance_owed_total > 0 else 'text-success' }}">
+          ₹{{ '{:,.0f}'.format(balance_owed_total) }}
+        </td>
+        <td></td>
+      </tr>
+    </tbody>
+  </table>
+  {% else %}
+  <div class="text-center text-muted py-5">
+    No trips for this transporter in the selected range.
+  </div>
+  {% endif %}
+</div>
+
+<style>@media print {.no-print, .navbar { display: none !important; }}</style>
+{% endblock %}

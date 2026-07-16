@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty, pill, trip_lifecycle %}
+{% block title %}Trip 360 — Munshi{% endblock %}
+{% block content %}
+
+{% macro money(v) %}₹{{ '{:,.0f}'.format(v or 0) }}{% endmacro %}
+
+{{ page_header(
+    'Trip 360',
+    'Find any trip by LR No., Del No., Invoice, Vehicle, GR No. — see the entire lifecycle'
+) }}
+
+<form method="get" class="card mb-3">
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-md-9">
+        <label class="form-label small">Search</label>
+        <input type="text" name="q" class="form-control" autofocus
+               value="{{ q or '' }}"
+               placeholder="e.g. 13833 (LR) · 893358002 (Del No.) · 880207639 (Invoice) · UP71T8680 (Vehicle)">
+        <div class="form-text">Tries each identifier in order: LR → Del No. / PoD Doc No. → Invoice → Ledger GR → Vehicle.</div>
+      </div>
+      <div class="col-md-3 text-end">
+        <button class="btn btn-primary"><i class="bi bi-search me-1"></i>Find Trip</button>
+      </div>
+    </div>
+  </div>
+</form>
+
+{% if q and not trip and not matches %}
+  <div class="jl-card">
+    {{ empty('No trip found',
+             'No challan, ledger entry, or invoice matched "' + q + '". Try the LR number from the challan or the Doc No. from the PoD slip.',
+             'bi-search') }}
+  </div>
+{% endif %}
+
+{# ── Multiple matches: show a picker list ── #}
+{% if matches %}
+  <div class="jl-card">
+    <div class="jl-card-header">
+      <div>
+        <div class="jl-card-title"><i class="bi bi-collection me-2"></i>{{ matches|length }} possible trips</div>
+        <div class="jl-card-subtitle">Pick one to see the full timeline</div>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover small mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>LR / GR</th>
+            <th>Date</th>
+            <th>Vehicle</th>
+            <th>Consignee / Station</th>
+            <th>Match reason</th>
+            <th class="text-center">Confidence</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in matches %}
+          <tr>
+            <td class="fw-semibold">{{ m.lr_no or '—' }}</td>
+            <td class="text-nowrap">{{ m.date | date if m.date else '—' }}</td>
+            <td>{{ m.vehicle or '—' }}</td>
+            <td>{{ m.consignee or '—' }}</td>
+            <td><small class="text-muted">{{ m.reason }}</small></td>
+            <td class="text-center">
+              {% if m.confidence >= 95 %}{{ pill(m.confidence|string + '%', 'success') }}
+              {% elif m.confidence >= 80 %}{{ pill(m.confidence|string + '%', 'info') }}
+              {% else %}{{ pill(m.confidence|string + '%', 'warning') }}{% endif %}
+            </td>
+            <td class="text-end">
+              <a href="{{ url_for('trip_lookup', q=m.lr_no) if m.lr_no else url_for('challan_review', challan_id=m.challan_id) if m.challan_id else url_for('ledger_view', le_id=m.le_id) }}"
+                 class="btn btn-sm btn-primary">Open →</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endif %}
+
+{# ── Single trip found: full timeline view ── #}
+{% if trip %}
+
+  {# Lifecycle progress at top #}
+  <div class="jl-card mb-3">
+    <div class="jl-card-header">
+      <div>
+        <div class="jl-card-title">
+          <i class="bi bi-truck me-2"></i>
+          Trip {{ trip.challan.lr_no if trip.challan and trip.challan.lr_no else (trip.ledger.gr_no if trip.ledger else '#' + (trip.challan.id|string if trip.challan else trip.ledger.id|string)) }}
+        </div>
+        <div class="jl-card-subtitle">
+          {% if trip.challan %}{{ trip.challan.consignor_name or '' }} → {{ trip.challan.consignee_name or '' }}{% endif %}
+          {% if trip.match_reason %} · <span class="text-muted">matched on: {{ trip.match_reason }}</span>{% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="px-3 pb-3">
+      {{ trip_lifecycle(
+        trip.challan is not none,
+        trip.ledger and trip.ledger.pod_received,
+        trip.bill is not none,
+        trip.bill and trip.bill.client_paid
+      ) }}
+    </div>
+  </div>
+
+  {# Warnings: data integrity issues across docs #}
+  {% if trip.warnings %}
+    <div class="alert alert-warning">
+      <strong><i class="bi bi-exclamation-triangle me-1"></i>Data mismatches detected:</strong>
+      <ul class="mb-0 mt-1">
+        {% for w in trip.warnings %}<li>{{ w }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <div class="row g-3">
+
+    {# ── Challan card ── #}
+    <div class="col-lg-6">
+      <div class="jl-card h-100">
+        <div class="jl-card-header">
+          <div>
+            <div class="jl-card-title"><i class="bi bi-clipboard2-pulse me-2 text-info"></i>Challan (Dispatch)</div>
+            <div class="jl-card-subtitle">JL Goods Consignment Note</div>
+          </div>
+          {% if trip.challan %}
+            <a href="{{ url_for('challan_review', challan_id=trip.challan.id) }}" class="btn btn-sm btn-outline-primary">Open →</a>
+          {% endif %}
+        </div>
+        <div class="px-3 pb-3">
+        {% if trip.challan %}
+          <table class="table table-sm small mb-0">
+            <tr><th class="text-muted">LR No.</th><td class="fw-semibold">{{ trip.challan.lr_no or '—' }}</td></tr>
+            <tr><th class="text-muted">Date</th><td>{{ trip.challan.challan_date | date if trip.challan.challan_date else '—' }}</td></tr>
+            <tr><th class="text-muted">Vehicle</th><td class="fw-semibold">{{ trip.challan.truck_no or '—' }}</td></tr>
+            <tr><th class="text-muted">Driver</th><td>{{ trip.challan.driver_name or '—' }} {% if trip.challan.driver_mobile %}· {{ trip.challan.driver_mobile }}{% endif %}</td></tr>
+            <tr><th class="text-muted">Route</th><td>{{ trip.challan.from_city_state or '—' }} → {{ trip.challan.to_city_state or '—' }}</td></tr>
+            <tr><th class="text-muted">Invoice No.</th><td class="fw-semibold">{{ trip.challan.invoice_no or '—' }}</td></tr>
+            <tr><th class="text-muted">Del No.</th><td class="fw-semibold">{{ trip.challan.del_no or '—' }}</td></tr>
+            {% if trip.challan.pod_doc_no %}
+              <tr><th class="text-muted">PoD Doc No.</th><td class="fw-semibold">{{ trip.challan.pod_doc_no }}</td></tr>
+            {% endif %}
+            <tr><th class="text-muted">Weight</th><td>{{ '{:,.2f} kg'.format(trip.challan.weight_kg) if trip.challan.weight_kg else '—' }}</td></tr>
+            <tr><th class="text-muted">Articles</th><td>{{ trip.challan.no_of_articles or '—' }}</td></tr>
+            <tr><th class="text-muted">Status</th><td>
+              {% if trip.challan.status == 'draft' %}{{ pill('Draft', 'warning') }}
+              {% elif trip.challan.status == 'pod_received' %}{{ pill('POD ✓', 'info') }}
+              {% elif trip.challan.status == 'billed' %}{{ pill('Billed', 'success') }}
+              {% else %}{{ pill('Open', 'neutral') }}{% endif %}
+            </td></tr>
+          </table>
+        {% else %}
+          {{ empty('No challan on file',
+                   'This trip exists in the ledger but has no challan record. The truck was dispatched without a digitised LR.',
+                   'bi-clipboard-x') }}
+        {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# ── Ledger card ── #}
+    <div class="col-lg-6">
+      <div class="jl-card h-100">
+        <div class="jl-card-header">
+          <div>
+            <div class="jl-card-title"><i class="bi bi-journal-text me-2 text-warning"></i>Ledger (Money)</div>
+            <div class="jl-card-subtitle">Daily Bill Register entry</div>
+          </div>
+          {% if trip.ledger %}
+            <a href="{{ url_for('ledger_view', le_id=trip.ledger.id) }}" class="btn btn-sm btn-outline-primary">Open →</a>
+          {% endif %}
+        </div>
+        <div class="px-3 pb-3">
+        {% if trip.ledger %}
+          <table class="table table-sm small mb-0">
+            <tr><th class="text-muted">GR No.</th><td class="fw-semibold">{{ trip.ledger.gr_no or '—' }}</td></tr>
+            <tr><th class="text-muted">Date</th><td>{{ trip.ledger.entry_date | date if trip.ledger.entry_date else '—' }}</td></tr>
+            <tr><th class="text-muted">Vehicle</th><td>{{ trip.ledger.vehicle_no or '—' }}</td></tr>
+            <tr><th class="text-muted">Station</th><td>{{ trip.ledger.station or '—' }}</td></tr>
+            <tr><th class="text-muted">MT Qty</th><td>{{ '{:,.2f}'.format(trip.ledger.mt_qty) if trip.ledger.mt_qty else '—' }}</td></tr>
+            <tr><th class="text-muted">Freight</th><td>{{ money(trip.ledger.freight) }}</td></tr>
+            <tr><th class="text-muted">Adv. Cash</th><td>{{ money(trip.ledger.advance_cash) }}</td></tr>
+            <tr><th class="text-muted">Adv. A/c</th><td>{{ money(trip.ledger.advance_account) }}</td></tr>
+            <tr><th class="text-muted">Diesel</th><td>{{ money(trip.ledger.diesel) }}</td></tr>
+            <tr class="table-light"><th>Balance owed</th><td class="fw-bold">{{ money(trip.ledger.balance) }}</td></tr>
+            <tr><th class="text-muted">POD</th><td>
+              {% if trip.ledger.pod_received %}{{ pill('POD ✓ ' + (trip.ledger.pod_date|date if trip.ledger.pod_date else ''), 'success') }}
+              {% else %}{{ pill('Pending', 'warning') }}{% endif %}
+            </td></tr>
+            <tr><th class="text-muted">Paid</th><td>
+              {% if trip.ledger.paid %}{{ pill((trip.ledger.paid_mode or 'Paid') + ' ✓', 'success') }}
+              {% else %}{{ pill('Unpaid', 'neutral') }}{% endif %}
+            </td></tr>
+          </table>
+        {% else %}
+          {{ empty('No ledger entry',
+                   'This challan has not been entered into the ledger yet. Open the challan to create one.',
+                   'bi-journal-x') }}
+        {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# ── Bill card ── #}
+    <div class="col-lg-6">
+      <div class="jl-card h-100">
+        <div class="jl-card-header">
+          <div>
+            <div class="jl-card-title"><i class="bi bi-receipt me-2 text-success"></i>Bill (Client Receivable)</div>
+            <div class="jl-card-subtitle">Invoice raised on consignor</div>
+          </div>
+          {% if trip.bill %}
+            <a href="{{ url_for('view_bill', bill_id=trip.bill.id) }}" class="btn btn-sm btn-outline-primary">Open →</a>
+          {% endif %}
+        </div>
+        <div class="px-3 pb-3">
+        {% if trip.bill %}
+          <table class="table table-sm small mb-0">
+            <tr><th class="text-muted">Bill No.</th><td class="fw-semibold">{{ trip.bill.bill_no }}</td></tr>
+            <tr><th class="text-muted">Bill Date</th><td>{{ trip.bill.bill_date or '—' }}</td></tr>
+            <tr><th class="text-muted">Recipient</th><td>{{ trip.bill.recipient_name or '—' }}</td></tr>
+            <tr><th class="text-muted">Vehicle</th><td>{{ trip.bill.vehicle_no or '—' }}</td></tr>
+            <tr class="table-light"><th>Total</th><td class="fw-bold">{{ money(trip.bill.total_amount) }}</td></tr>
+            <tr><th class="text-muted">Client Paid</th><td>
+              {% if trip.bill.client_paid %}{{ pill((trip.bill.client_paid_mode or 'Paid') + ' ✓', 'success') }}
+              {% if trip.bill.client_paid_date %}<small class="text-muted ms-1">{{ trip.bill.client_paid_date | date }}</small>{% endif %}
+              {% else %}{{ pill('Unpaid', 'warning') }}{% endif %}
+            </td></tr>
+          </table>
+        {% else %}
+          {{ empty('No bill yet',
+                   'Once POD is received and entered, you can create a bill. Use Ready-to-Bill to convert.',
+                   'bi-receipt-cutoff',
+                   'Open Ready-to-Bill', url_for('ready_to_bill')) }}
+        {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# ── Payments card ── #}
+    <div class="col-lg-6">
+      <div class="jl-card h-100">
+        <div class="jl-card-header">
+          <div>
+            <div class="jl-card-title"><i class="bi bi-cash-stack me-2 text-primary"></i>Payments</div>
+            <div class="jl-card-subtitle">Receipts from client &amp; payouts to transporter</div>
+          </div>
+        </div>
+        <div class="px-3 pb-3">
+          {% if trip.payments_from_client %}
+            <div class="small fw-semibold text-success mb-1"><i class="bi bi-arrow-down-circle me-1"></i>Received from client</div>
+            <table class="table table-sm small mb-3">
+              <thead class="table-light"><tr><th>Date</th><th>Mode</th><th>Ref</th><th class="text-end">Amount</th></tr></thead>
+              <tbody>
+              {% for p in trip.payments_from_client %}
+                <tr><td>{{ p.payment_date | date }}</td><td>{{ p.mode or '—' }}</td><td><small>{{ p.reference or '' }}</small></td><td class="text-end fw-semibold">{{ money(p.amount) }}</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+          {% if trip.payments_to_transporter %}
+            <div class="small fw-semibold text-info mb-1"><i class="bi bi-arrow-up-circle me-1"></i>Paid to transporter</div>
+            <table class="table table-sm small mb-0">
+              <thead class="table-light"><tr><th>Date</th><th>Mode</th><th>Ref</th><th class="text-end">Amount</th></tr></thead>
+              <tbody>
+              {% for p in trip.payments_to_transporter %}
+                <tr><td>{{ p.payment_date | date }}</td><td>{{ p.mode or '—' }}</td><td><small>{{ p.reference or '' }}</small></td><td class="text-end fw-semibold">{{ money(p.amount) }}</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+          {% if not trip.payments_from_client and not trip.payments_to_transporter %}
+            {{ empty('No payments recorded yet',
+                     'Direct settlement payments to transporter or receipts from client will appear here.',
+                     'bi-cash') }}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+  </div>
+{% endif %}
+
+{% if not q %}
+  <div class="jl-card">
+    <div class="jl-card-header">
+      <div>
+        <div class="jl-card-title"><i class="bi bi-info-circle me-2"></i>How Trip 360 works</div>
+      </div>
+    </div>
+    <div class="px-3 pb-3 small text-muted">
+      <p class="mb-2">Type any of these identifiers — Trip 360 finds the trip and shows challan + ledger + bill + payments side-by-side.</p>
+      <ul class="mb-0">
+        <li><strong>LR / GR No.</strong> — the number on the JL challan top-right (e.g. <code>13833</code>)</li>
+        <li><strong>Del No. / PoD Doc No.</strong> — top of the consignor's PoD slip (e.g. <code>893358002</code>)</li>
+        <li><strong>Invoice No.</strong> — middle of slash-triple on PoD (e.g. <code>880207639</code>)</li>
+        <li><strong>Vehicle No.</strong> — truck reg (e.g. <code>UP71T8680</code>)</li>
+      </ul>
+    </div>
+  </div>
+{% endif %}
+
+{% endblock %}

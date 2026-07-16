@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Activity Log — Munshi{% endblock %}
+{% block content %}
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0"><i class="bi bi-clock-history me-2"></i>Activity Log</h5>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left"></i> Dashboard
+    </a>
+  </div>
+
+  <form method="get" class="card mb-3">
+    <div class="card-body py-2">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-2">
+          <label class="form-label small">User</label>
+          <select name="user" class="form-select form-select-sm">
+            <option value="">All</option>
+            {% for u in distinct_users %}
+              <option value="{{ u }}" {{ 'selected' if filters.user == u }}>{{ u }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Entity</label>
+          <select name="entity" class="form-select form-select-sm">
+            <option value="">All</option>
+            {% for e in distinct_entities %}
+              <option value="{{ e }}" {{ 'selected' if filters.entity == e }}>{{ e }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Action</label>
+          <select name="action" class="form-select form-select-sm">
+            <option value="">All</option>
+            {% for a in distinct_actions %}
+              <option value="{{ a }}" {{ 'selected' if filters.action == a }}>{{ a }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">From</label>
+          <input type="date" name="from" class="form-control form-control-sm" value="{{ filters.from or '' }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">To</label>
+          <input type="date" name="to" class="form-control form-control-sm" value="{{ filters.to or '' }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Search</label>
+          <input type="text" name="q" class="form-control form-control-sm" value="{{ filters.q or '' }}"
+                 placeholder="bill no / GR / consignee">
+        </div>
+      </div>
+      <div class="text-end mt-2">
+        <button class="btn btn-primary btn-sm">Filter</button>
+        <a href="{{ url_for('audit_log_view') }}" class="btn btn-outline-secondary btn-sm">Clear</a>
+      </div>
+    </div>
+  </form>
+
+  {% if entries %}
+  <div class="table-responsive">
+    <table class="table table-bordered table-sm small align-middle">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:160px">When</th>
+          <th>User</th>
+          <th>Action</th>
+          <th>Entity</th>
+          <th>Summary</th>
+          <th>Changes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td class="text-nowrap">{{ e.occurred_at.replace('T', ' ')[:19] if e.occurred_at else '' }}</td>
+          <td><span class="badge bg-secondary">{{ e.user_name or '—' }}</span></td>
+          <td>
+            {% set color = {
+              'create': 'success', 'update': 'warning text-dark', 'delete': 'danger',
+              'pod_mark': 'info text-dark', 'paid_mark': 'primary',
+              'client_paid': 'primary'
+            }.get(e.action, 'secondary') %}
+            <span class="badge bg-{{ color }}">{{ e.action or '' }}</span>
+          </td>
+          <td>
+            {% if e.entity == 'bill' %}
+              <a href="{{ url_for('view_bill', bill_id=e.entity_id) }}">bill #{{ e.entity_id }}</a>
+            {% elif e.entity == 'challan' %}
+              <a href="{{ url_for('challan_review', challan_id=e.entity_id) }}">challan #{{ e.entity_id }}</a>
+            {% elif e.entity == 'ledger_entry' %}
+              <a href="{{ url_for('ledger_view', le_id=e.entity_id) }}">ledger #{{ e.entity_id }}</a>
+            {% else %}
+              {{ e.entity }} #{{ e.entity_id }}
+            {% endif %}
+          </td>
+          <td>{{ e.summary or '' }}</td>
+          <td>
+            {% if e.changes_parsed %}
+              <details>
+                <summary class="text-muted">{{ e.changes_parsed.keys()|length }} field{{ '' if e.changes_parsed.keys()|length == 1 else 's' }}</summary>
+                <table class="table table-sm mb-0 mt-1" style="font-size:11px">
+                  <tbody>
+                    {% for k, v in e.changes_parsed.items() %}
+                    <tr>
+                      <td class="text-muted">{{ k }}</td>
+                      <td><span class="text-danger">{{ v[0] if v[0] is not none else '∅' }}</span></td>
+                      <td>→</td>
+                      <td><span class="text-success">{{ v[1] if v[1] is not none else '∅' }}</span></td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="text-muted small">{{ entries|length }} event{{ '' if entries|length == 1 else 's' }} (most recent first, capped at 500).</p>
+  {% else %}
+  <div class="text-center text-muted py-5">
+    <i class="bi bi-clock-history fs-1 d-block mb-2"></i>
+    No activity matches the filters.
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

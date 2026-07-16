@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Transporter Statements — Munshi{% endblock %}
+{% block content %}
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0"><i class="bi bi-truck-flatbed me-2"></i>Per-Transporter Statement</h5>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left"></i> Dashboard
+    </a>
+  </div>
+
+  <form method="get" class="card mb-3">
+    <div class="card-body py-2">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label small">From (optional)</label>
+          <input type="date" name="from" class="form-control form-control-sm" value="{{ date_from }}">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small">To (optional)</label>
+          <input type="date" name="to" class="form-control form-control-sm" value="{{ date_to }}">
+        </div>
+        <div class="col-md-6 text-end">
+          <button class="btn btn-primary btn-sm">Apply</button>
+          <a href="{{ url_for('report_transporters') }}" class="btn btn-outline-secondary btn-sm">All time</a>
+          <a href="{{ url_for('masters_index') }}" class="btn btn-outline-info btn-sm">+ Add transporter</a>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {% if rows %}
+  <table class="table table-bordered table-hover small align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Transporter</th>
+        <th>Mobile</th>
+        <th class="text-end">Trips</th>
+        <th class="text-end">Freight</th>
+        <th class="text-end">Adv. Cash</th>
+        <th class="text-end">Adv. A/c</th>
+        <th class="text-end">Diesel</th>
+        <th class="text-end">Balance owed</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><a href="{{ url_for('report_transporter_detail', tid=r.id) }}">{{ r.name }}</a></td>
+        <td>{{ r.mobile or '' }}</td>
+        <td class="text-end">{{ r.trip_count or 0 }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(r.total_freight or 0) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(r.total_cash or 0) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(r.total_account or 0) }}</td>
+        <td class="text-end">{{ '{:,.0f}'.format(r.total_diesel or 0) }}</td>
+        <td class="text-end fw-bold {{ 'text-danger' if (r.balance_owed or 0) > 0 else 'text-success' }}">
+          ₹{{ '{:,.0f}'.format(r.balance_owed or 0) }}
+        </td>
+        <td>
+          <a href="{{ url_for('report_transporter_detail', tid=r.id) }}"
+             class="btn btn-sm btn-outline-primary">
+            <i class="bi bi-eye"></i>
+          </a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if unassigned and unassigned.trip_count > 0 %}
+  <div class="alert alert-warning small mt-3">
+    <strong>{{ unassigned.trip_count }} ledger entries</strong> have no transporter assigned —
+    Freight ₹{{ '{:,.0f}'.format(unassigned.total_freight) }},
+    Diesel ₹{{ '{:,.0f}'.format(unassigned.total_diesel) }}.
+    <a href="{{ url_for('ledger_index') }}">Review</a> and pick a transporter on each entry to roll
+    them into the table above.
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="text-center text-muted py-5">
+    <i class="bi bi-inbox fs-1 d-block mb-2"></i>
+    No transporters yet. <a href="{{ url_for('masters_index') }}">Add one in Masters</a> to start tracking.
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,118 @@
+# GitHub Actions: build Munshi for Windows + macOS on every push to main.
+# Output: downloadable artifacts on the run page (private repo → only you can see).
+#
+# Trigger: every push to main, or manually via the Actions tab "Run workflow".
+# Runs in parallel on two GitHub-hosted runners (free for private repos
+# up to 2000 minutes/month — each Munshi build ≈ 5 minutes, plenty of headroom).
+
+name: Build Munshi
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:    # manual trigger from the Actions tab
+
+# Cancel previous in-progress runs when a new commit comes in
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # if Windows fails, still finish macOS so you have one platform
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Munshi-windows
+            script: build/build_windows.bat
+          - os: macos-latest
+            artifact: Munshi-macos
+            script: bash build/build_macos.sh
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build the bundle
+        shell: bash
+        env:
+          PY: python
+        run: ${{ matrix.script }}
+
+      - name: Verify bundle exists
+        shell: bash
+        run: |
+          if [ ! -d "build/dist/Munshi" ]; then
+            echo "BUILD FAILED — build/dist/Munshi/ does not exist"
+            ls -la build/dist/ || true
+            exit 1
+          fi
+          echo "Bundle contents:"
+          ls -la build/dist/Munshi/ | head -20
+          du -sh build/dist/Munshi/
+
+      - name: Smoke-test that the app actually boots
+        shell: bash
+        working-directory: build/dist/Munshi
+        run: |
+          export PORT=5056
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./Munshi.exe &
+          else
+            ./Munshi &
+          fi
+          APPPID=$!
+          ok=0
+          for i in $(seq 1 30); do
+            code=$(curl -s -m3 -o /dev/null -w "%{http_code}" http://127.0.0.1:5056/health || true)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            taskkill //F //IM Munshi.exe >/dev/null 2>&1 || true
+          else
+            kill $APPPID >/dev/null 2>&1 || true
+          fi
+          # Remove runtime files the smoke test created so the shipped zip is a clean fresh install
+          rm -f bills.db .flask_secret
+          rm -rf backups uploads
+          if [ "$ok" != "1" ]; then
+            echo "SMOKE TEST FAILED — the app did not answer /health on $RUNNER_OS"
+            exit 1
+          fi
+          echo "Smoke test passed: /health returned 200 on $RUNNER_OS"
+
+      - name: Zip the bundle
+        shell: bash
+        working-directory: build/dist
+        run: |
+          # Use 7zip (built into GitHub runners) for both platforms — uniform output
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip Munshi.zip Munshi/
+          else
+            zip -r Munshi.zip Munshi/
+          fi
+          ls -la Munshi.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/dist/Munshi.zip
+          retention-days: 90       # artifacts auto-delete after 90 days
+          if-no-files-found: error

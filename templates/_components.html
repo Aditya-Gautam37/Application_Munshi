@@ -1,0 +1,100 @@
+{# ════════════════════════════════════════════════════════════════════════
+   Reusable UI components for the Munshi app.
+   Usage: {% from '_components.html' import pill, progress, empty, kpi, page_header %}
+════════════════════════════════════════════════════════════════════════ #}
+
+{# ── Status pill ── #}
+{% macro pill(label, kind='neutral', icon=None) %}
+<span class="jl-pill {{ kind }}">
+  {% if icon %}<i class="bi {{ icon }}"></i>{% endif %}
+  {{ label }}
+</span>
+{% endmacro %}
+
+{# ── KPI card ── #}
+{% macro kpi(label, value, meta='', icon='bi-bar-chart', kind='primary', link=None) %}
+{% if link %}<a href="{{ link }}" style="text-decoration:none">{% endif %}
+<div class="jl-kpi {{ kind }}">
+  <div class="jl-kpi-icon"><i class="bi {{ icon }}"></i></div>
+  <div class="jl-kpi-label">{{ label }}</div>
+  <div class="jl-kpi-value">{{ value }}</div>
+  {% if meta %}<div class="jl-kpi-meta">{{ meta }}</div>{% endif %}
+</div>
+{% if link %}</a>{% endif %}
+{% endmacro %}
+
+{# ── Lifecycle progress bar (e.g., Trip: Created → POD → Billed → Paid) ──
+   `steps` is a list of dicts: [{label, state}] where state is 'done' | 'current' | 'pending'
+#}
+{% macro progress(steps) %}
+<div class="jl-progress">
+  {% for s in steps %}
+  <div class="jl-progress-step {{ s.state }}">
+    <div class="jl-progress-bullet">
+      {% if s.state == 'done' %}<i class="bi bi-check"></i>
+      {% else %}{{ loop.index }}{% endif %}
+    </div>
+    <div class="jl-progress-label">{{ s.label }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{# ── Trip lifecycle (specific helper) ── #}
+{% macro trip_lifecycle(has_challan, has_pod, has_bill, has_payment) %}
+{{ progress([
+  {'label': 'Created',   'state': 'done' if has_challan else 'pending'},
+  {'label': 'POD',       'state': 'done' if has_pod else ('current' if has_challan else 'pending')},
+  {'label': 'Billed',    'state': 'done' if has_bill else ('current' if has_pod else 'pending')},
+  {'label': 'Paid',      'state': 'done' if has_payment else ('current' if has_bill else 'pending')},
+]) }}
+{% endmacro %}
+
+{# ── Empty state ── #}
+{% macro empty(title, message, icon='bi-inbox', cta_text=None, cta_link=None) %}
+<div class="jl-empty">
+  <div class="jl-empty-illustration"><i class="bi {{ icon }}"></i></div>
+  <div class="jl-empty-title">{{ title }}</div>
+  <div class="jl-empty-message">{{ message }}</div>
+  {% if cta_text and cta_link %}
+    <a href="{{ cta_link }}" class="btn btn-primary">
+      <i class="bi bi-plus-circle me-1"></i>{{ cta_text }}
+    </a>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{# ── Page header ── #}
+{% macro page_header(title, subtitle='', actions='') %}
+<div class="jl-page-header">
+  <div>
+    <h1 class="jl-page-title">{{ title }}</h1>
+    {% if subtitle %}<p class="jl-page-subtitle">{{ subtitle }}</p>{% endif %}
+  </div>
+  {% if actions %}<div class="jl-row">{{ actions|safe }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+{# ── Status pill helpers for common entity states ── #}
+{% macro pod_pill(received, overdue=False, date='') %}
+  {% if received %}{{ pill(t('POD ✓') + ' ' + (date|date if date else ''), 'success') }}
+  {% elif overdue %}{{ pill(t('POD overdue'), 'danger', 'bi-exclamation-triangle') }}
+  {% else %}{{ pill(t('POD pending'), 'warning') }}{% endif %}
+{% endmacro %}
+
+{% macro paid_pill(paid, mode='') %}
+  {% if paid %}{{ pill((mode or t('Paid')) + ' ✓', 'success') }}
+  {% else %}{{ pill(t('Unpaid'), 'neutral') }}{% endif %}
+{% endmacro %}
+
+{% macro client_balance_pill(balance) %}
+  {% if balance|abs < 0.005 %}{{ pill(t('Settled'), 'success', 'bi-check-circle') }}
+  {% elif balance > 0 %}{{ pill('₹' + '{:,.0f}'.format(balance) + ' ' + t('due'), 'warning') }}
+  {% else %}{{ pill(t('Advance') + ' ₹' + '{:,.0f}'.format(-balance), 'info') }}{% endif %}
+{% endmacro %}
+
+{% macro vendor_balance_pill(balance) %}
+  {% if balance|abs < 0.005 %}{{ pill(t('Settled'), 'success', 'bi-check-circle') }}
+  {% elif balance > 0 %}{{ pill('₹' + '{:,.0f}'.format(balance) + ' ' + t('payable'), 'info') }}
+  {% else %}{{ pill(t('Overpaid') + ' ₹' + '{:,.0f}'.format(-balance), 'neutral') }}{% endif %}
+{% endmacro %}

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty %}
+{% block title %}Master Data — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header('Master Data', 'Transporters and diesel vendors used across all trips') }}
+
+<div class="jl-card">
+  <ul class="nav nav-tabs px-3 pt-3" id="mastersTabs" role="tablist" style="border-color: var(--jl-divider)">
+    <li class="nav-item">
+      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-transporters" type="button">
+        <i class="bi bi-truck-flatbed me-1"></i>Transporters ({{ transporters|length }})
+      </button>
+    </li>
+    <li class="nav-item">
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-diesel" type="button">
+        <i class="bi bi-fuel-pump me-1"></i>Diesel Vendors ({{ diesel_vendors|length }})
+      </button>
+    </li>
+  </ul>
+
+  <div class="tab-content p-3">
+
+    <!-- ── Transporters ── -->
+    <div class="tab-pane fade show active" id="tab-transporters">
+      <p class="text-muted small">Vehicle owners. Used to track advances + balance per owner.</p>
+
+      <form method="post" action="{{ url_for('transporter_add') }}" class="row g-2 mb-3 align-items-end">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="col-md-3">
+          <label class="form-label small">Name *</label>
+          <input type="text" name="name" class="form-control form-control-sm" required>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Mobile</label>
+          <input type="text" name="mobile" class="form-control form-control-sm">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Bank / UPI details</label>
+          <input type="text" name="bank_details" class="form-control form-control-sm" placeholder="A/c …, IFSC … or UPI id">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Notes</label>
+          <input type="text" name="notes" class="form-control form-control-sm">
+        </div>
+        <div class="col-md-1">
+          <button class="btn btn-success btn-sm w-100"><i class="bi bi-plus"></i> Add</button>
+        </div>
+      </form>
+
+      {% if transporters %}
+      <table class="table table-sm table-bordered table-hover">
+        <thead class="table-light">
+          <tr><th>Name</th><th>Mobile</th><th>Bank / UPI</th><th>Notes</th><th style="width:60px"></th></tr>
+        </thead>
+        <tbody>
+          {% for t in transporters %}
+          <tr>
+            <td>{{ t.name }}</td>
+            <td>{{ t.mobile or '' }}</td>
+            <td>{{ t.bank_details or '' }}</td>
+            <td>{{ t.notes or '' }}</td>
+            <td>
+              <form method="post" action="{{ url_for('transporter_delete', tid=t.id) }}"
+                    onsubmit="return confirm('Remove transporter {{ t.name }}?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      {{ empty('No transporters yet',
+               'Add vehicle owners above. Each transporter gets their own running balance ledger.',
+               'bi-truck-flatbed') }}
+      {% endif %}
+    </div>
+
+    <!-- ── Diesel vendors ── -->
+    <div class="tab-pane fade" id="tab-diesel">
+      <p class="text-muted small">Diesel pumps you draw fuel from. Used in the ledger and diesel summary report.</p>
+
+      <form method="post" action="{{ url_for('diesel_vendor_add') }}" class="row g-2 mb-3 align-items-end">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="col-md-4">
+          <label class="form-label small">Name *</label>
+          <input type="text" name="name" class="form-control form-control-sm" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Location</label>
+          <input type="text" name="location" class="form-control form-control-sm">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small">Notes</label>
+          <input type="text" name="notes" class="form-control form-control-sm">
+        </div>
+        <div class="col-md-1">
+          <button class="btn btn-success btn-sm w-100"><i class="bi bi-plus"></i> Add</button>
+        </div>
+      </form>
+
+      {% if diesel_vendors %}
+      <table class="table table-sm table-bordered table-hover">
+        <thead class="table-light">
+          <tr><th>Name</th><th>Location</th><th>Notes</th><th style="width:60px"></th></tr>
+        </thead>
+        <tbody>
+          {% for v in diesel_vendors %}
+          <tr>
+            <td>{{ v.name }}</td>
+            <td>{{ v.location or '' }}</td>
+            <td>{{ v.notes or '' }}</td>
+            <td>
+              <form method="post" action="{{ url_for('diesel_vendor_delete', vid=v.id) }}"
+                    onsubmit="return confirm('Remove vendor {{ v.name }}?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      {{ empty('No diesel vendors yet',
+               'Add diesel pumps above. Each fuel entry on a trip can be linked to one of these vendors.',
+               'bi-fuel-pump') }}
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+{% endblock %}

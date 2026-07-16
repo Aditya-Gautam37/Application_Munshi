@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}{{ display_name }} — Ledger Card{% endblock %}
+{% block content %}
+
+{% macro money(v, sign='') -%}
+<span class="{{ 'text-danger' if v < 0 else ('text-success' if v > 0 else 'text-muted') }}">
+{{ sign }}₹{{ '{:,.2f}'.format(v|abs) }}
+</span>
+{%- endmacro %}
+
+{% set party_label = {'client':'Client','transporter':'Transporter','diesel_vendor':'Diesel Vendor'}[party_type] %}
+{% set bal_caption = 'Owed by client' if party_type == 'client' else 'Owed by us' %}
+
+<div class="container px-4 pb-5" style="max-width:1100px">
+
+  <div class="d-flex justify-content-between align-items-start mb-3">
+    <div>
+      <small class="text-muted">{{ party_label }}</small>
+      <h4 class="fw-bold mb-0">{{ display_name }}</h4>
+      {% if extra_info.mobile %}<small class="text-muted">📱 {{ extra_info.mobile }}</small>{% endif %}
+      {% if extra_info.bank_details %}<small class="text-muted ms-2">🏦 {{ extra_info.bank_details }}</small>{% endif %}
+      {% if extra_info.location %}<small class="text-muted">📍 {{ extra_info.location }}</small>{% endif %}
+    </div>
+    <a href="{{ url_for('payments_hub') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left"></i> All payments
+    </a>
+  </div>
+
+  <!-- ── Summary strip ── -->
+  <div class="row g-2 mb-3">
+    <div class="col-md-4">
+      <div class="card border-0 bg-light">
+        <div class="card-body py-2">
+          <div class="text-muted small">Total charges</div>
+          <div class="fs-5 fw-bold">₹{{ '{:,.2f}'.format(total_charges) }}</div>
+          <small class="text-muted">
+            {% if party_type == 'client' %}sum of bills sent{% endif %}
+            {% if party_type == 'transporter' %}freight − on-trip advances{% endif %}
+            {% if party_type == 'diesel_vendor' %}fuel drawn{% endif %}
+          </small>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card border-0 bg-light">
+        <div class="card-body py-2">
+          <div class="text-muted small">Total payments</div>
+          <div class="fs-5 fw-bold">₹{{ '{:,.2f}'.format(total_paid) }}</div>
+          <small class="text-muted">
+            {% if party_type == 'client' %}received from client{% else %}paid to vendor{% endif %}
+          </small>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card border-{{ 'warning' if party_type == 'client' and balance > 0.005 else
+                                ('info' if balance > 0.005 else 'success') }}">
+        <div class="card-body py-2">
+          <div class="text-muted small">Current balance ({{ bal_caption }})</div>
+          <div class="fs-3 fw-bold {{ 'text-warning' if party_type == 'client' and balance > 0.005 else
+                                       ('text-info' if balance > 0.005 else 'text-success') }}">
+            ₹{{ '{:,.2f}'.format(balance) }}
+          </div>
+          <small class="text-muted">
+            {% if balance|abs < 0.005 %}fully settled
+            {% elif balance < 0 %}{% if party_type == 'client' %}client paid in advance{% else %}we overpaid the vendor{% endif %}
+            {% else %}{% if party_type == 'client' %}collect this from client{% else %}we still owe this{% endif %}
+            {% endif %}
+          </small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Record a payment ── -->
+  <div class="card mb-3 border-success">
+    <div class="card-header bg-success text-white py-2 fw-semibold">
+      <i class="bi bi-plus-circle me-1"></i>
+      Record a payment
+      ({{ 'received from client' if party_type == 'client' else 'paid to vendor' }})
+    </div>
+    <div class="card-body py-2">
+      <form method="post" action="{{ url_for('payment_add') }}" class="row g-2 align-items-end">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="party_type" value="{{ party_type }}">
+        <input type="hidden" name="party_key" value="{{ party_key }}">
+
+        <div class="col-md-2">
+          <label class="form-label small">Date *</label>
+          <input type="date" name="payment_date" class="form-control form-control-sm" value="{{ today }}" required>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Amount (₹) *</label>
+          <input type="number" name="amount" class="form-control form-control-sm" step="any" min="0.01" required>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Mode</label>
+          <select name="mode" class="form-select form-select-sm">
+            <option value="">—</option>
+            <option>UPI</option><option>Bank</option><option>Cash</option><option>Cheque</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small">Reference</label>
+          <input type="text" name="reference" class="form-control form-control-sm" placeholder="UPI txn / Cheque no.">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small">Notes</label>
+          <input type="text" name="notes" class="form-control form-control-sm" placeholder="optional">
+        </div>
+        <div class="col-md-1">
+          <button class="btn btn-success btn-sm w-100"><i class="bi bi-check2"></i> Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Transactions (charges + payments interleaved by date) ── -->
+  <div class="card">
+    <div class="card-header bg-dark text-white py-2 fw-semibold d-flex justify-content-between">
+      <span><i class="bi bi-clock-history me-1"></i>Transactions</span>
+      <small class="fw-normal opacity-75">most recent first</small>
+    </div>
+    {% if transactions %}
+      <div class="table-responsive">
+        <table class="table table-sm mb-0 align-middle small">
+          <thead class="table-light">
+            <tr>
+              <th>Date</th>
+              <th>Description</th>
+              <th class="text-end">{{ 'Charge' if party_type == 'client' else 'Owed' }}</th>
+              <th class="text-end">Payment</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% set ns = namespace(running=balance) %}
+            {% for t in transactions %}
+            <tr>
+              <td class="text-nowrap">{{ t.date | date if t.date else '' }}</td>
+              <td>
+                {% if t.kind == 'charge' %}
+                  <i class="bi bi-receipt text-warning me-1"></i>
+                {% else %}
+                  <i class="bi bi-cash-coin text-success me-1"></i>
+                {% endif %}
+                {% if t.link %}<a href="{{ t.link }}">{{ t.label }}</a>{% else %}{{ t.label }}{% endif %}
+              </td>
+              <td class="text-end">
+                {% if t.kind == 'charge' %}
+                  <span class="text-warning">+₹{{ '{:,.2f}'.format(t.amount) }}</span>
+                {% endif %}
+              </td>
+              <td class="text-end">
+                {% if t.kind == 'payment' %}
+                  <span class="text-success">−₹{{ '{:,.2f}'.format(t.amount|abs) }}</span>
+                {% endif %}
+              </td>
+              <td class="text-center" style="width:50px">
+                {% if t.kind == 'payment' and t.payment_id %}
+                  <form method="post" action="{{ url_for('payment_delete', pid=t.payment_id) }}"
+                        class="d-inline" onsubmit="return confirm('Revert this ₹{{ t.amount|abs }} payment?')">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button class="btn btn-sm btn-link text-danger py-0 px-1" title="Revert payment">
+                      <i class="bi bi-arrow-counterclockwise"></i>
+                    </button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="card-body text-muted text-center py-4">
+        No transactions yet for this {{ party_label.lower() }}.
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

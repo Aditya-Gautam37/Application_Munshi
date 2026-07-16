@@ -1,0 +1,297 @@
+/* ── App base ──────────────────────────────────────────────────── */
+body { font-family: Arial, sans-serif; font-size: 14px; background: #f5f5f5; }
+
+.delivery-form-table { min-width: 1600px; }
+.delivery-form-table input { min-width: 60px; }
+
+/* ── Bill page (screen + print) ────────────────────────────────── */
+.bill-page {
+  width: 277mm;
+  min-height: 190mm;
+  margin: 0 auto 20px;
+  padding: 0;
+  border: 1.5px solid #000;
+  background: #fff;
+  font-family: Arial, sans-serif;
+  font-size: 8.5px;
+  color: #000;
+  box-sizing: border-box;
+}
+
+.bill-title-bar {
+  text-align: center;
+  font-size: 10px;
+  font-weight: bold;
+  border-bottom: 1.5px solid #000;
+  padding: 3px 0;
+  letter-spacing: 0.4px;
+}
+
+.bill-company-name {
+  text-align: center;
+  font-size: 24px;
+  font-weight: 900;
+  letter-spacing: 3px;
+  padding: 3px 0 0;
+}
+
+.bill-company-addr {
+  text-align: center;
+  font-size: 8px;
+  border-bottom: 1.5px solid #000;
+  padding: 1px 0 3px;
+}
+
+/* ── Info table (recipient left, bill right) ────────────────────── */
+.bill-info-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-bottom: 1.5px solid #000;
+  table-layout: fixed;
+}
+
+.bill-info-table > tbody > tr > td,
+.bill-info-table > tr > td { vertical-align: top; padding: 0; }
+
+.bill-info-left  { width: 60%; border-right: 1.5px solid #000; }
+.bill-info-right { width: 40%; }
+
+.bill-info-table .inner {
+  width: 100%;
+  border-collapse: collapse;
+  height: 100%;
+  table-layout: fixed;
+}
+
+.bill-info-table .inner td {
+  border-bottom: 1px solid #000;
+  padding: 3px 5px;
+  vertical-align: middle;
+  line-height: 1.15;
+}
+.bill-info-table .inner tr:last-child td { border-bottom: none; }
+
+.bill-info-table .inner .lbl {
+  font-size: 8px;
+  font-weight: 500;
+  color: #000;
+  white-space: nowrap;
+  width: 55%;
+}
+.bill-info-table .inner .sep { display: none; }
+.bill-info-table .inner .val {
+  font-size: 8.5px;
+  font-weight: 700;
+  width: 45%;
+  border-left: 1px solid #000;
+}
+
+/* Right-side has tighter rows since it has more entries */
+.bill-info-right .inner td { padding: 2px 5px; }
+.bill-info-right .inner .lbl { width: 50%; font-size: 7.5px; }
+.bill-info-right .inner .val { width: 50%; font-size: 8px; }
+
+/* Visual gap-divider row between vehicle group and transporter group */
+.bill-info-table .inner .bill-info-divider td {
+  border-top: 1.5px solid #000 !important;
+  border-bottom: none !important;
+  border-left: none !important;
+  padding: 0 !important;
+  height: 1px;
+  font-size: 0;
+  line-height: 0;
+}
+
+/* ── Delivery table ─────────────────────────────────────────────── */
+.bill-delivery-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-bottom: 1px solid #000;
+  margin-top: 0;
+}
+
+.bill-delivery-table th,
+.bill-delivery-table td {
+  border: 1px solid #000;
+  padding: 1px 2px;
+  font-size: 7px;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.bill-delivery-table thead th {
+  background: #e8e8e8;
+  font-weight: bold;
+  font-size: 6.5px;
+  line-height: 1.3;
+}
+
+.th-group { background: #d8d8d8 !important; font-size: 6px !important; }
+.th-sub   { font-size: 6px !important; }
+
+/* column widths */
+.th-sr   { width: 2%; }
+.th-gr   { width: 6%; }
+.th-sub  { width: 5%; }
+.th-loc  { width: 5%; }
+.th-cons { width: 9%; }
+.th-qty  { width: 4%; }
+.th-wt   { width: 6%; }
+.th-fr   { width: 5%; }
+.th-num  { width: 4%; }
+.th-vos  { width: 7%; }
+
+.delivery-row td { height: 14px; font-size: 7.5px; }
+.delivery-row.empty-row td { height: 14px; }
+.text-right { text-align: right !important; }
+.vos-cell   { font-weight: bold; }
+
+/* ── Footer table ───────────────────────────────────────────────── */
+.bill-footer-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.bill-footer-table > tr > td { vertical-align: top; padding: 0; }
+
+.footer-notes {
+  width: 68%;
+  border-right: 1px solid #000;
+  padding: 3px 4px;
+  border-top: 1px solid #000;
+}
+
+.tax-note-1 {
+  font-size: 7px;
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+.tax-note-2 {
+  font-size: 6.5px;
+  color: #333;
+}
+
+.footer-total-col {
+  width: 32%;
+  padding: 0;
+  border-top: 1px solid #000;
+}
+
+.total-inner {
+  width: 100%;
+  border-collapse: collapse;
+  border-bottom: 1px solid #000;
+}
+
+.total-inner td { padding: 3px 4px; }
+
+.total-lbl {
+  font-size: 7.5px;
+  font-weight: bold;
+  border-right: 1px solid #000;
+}
+
+.total-amt {
+  font-size: 9px;
+  font-weight: bold;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.signatory-box {
+  padding: 6px 4px 3px;
+  text-align: center;
+  min-height: 28px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.signatory-label {
+  font-size: 7px;
+  font-weight: bold;
+  border-top: 1px solid #000;
+  padding-top: 2px;
+  width: 80%;
+  text-align: center;
+}
+
+/* ── Summary page ───────────────────────────────────────────────── */
+.summary-page {
+  width: 277mm;
+  margin: 0 auto 20px;
+  padding: 4mm;
+  background: #fff;
+  font-family: Arial, sans-serif;
+  font-size: 8.5px;
+}
+
+.summary-header { text-align: center; margin-bottom: 6px; }
+.summary-company { font-size: 18px; font-weight: 900; letter-spacing: 2px; }
+.summary-title   { font-size: 11px; font-weight: bold; margin: 2px 0; }
+.summary-range   { font-size: 8px; color: #555; }
+
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.summary-table th,
+.summary-table td {
+  border: 1px solid #000;
+  padding: 2px 3px;
+  font-size: 7.5px;
+  vertical-align: middle;
+}
+
+.summary-table thead th {
+  background: #ddd;
+  font-weight: bold;
+  text-align: center;
+  line-height: 1.3;
+}
+
+.summary-total-row td {
+  background: #f0f0f0;
+  font-weight: bold;
+  border-top: 2px solid #000;
+}
+
+.summary-vos { text-align: right !important; font-weight: 600; }
+
+.summary-footer { text-align: right; margin-top: 10px; }
+.summary-signatory { display: inline-block; text-align: center; font-size: 8px; font-weight: bold; }
+.sig-line { border-top: 1px solid #000; margin-bottom: 2px; width: 120px; }
+
+/* ── Print overrides ────────────────────────────────────────────── */
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 4mm;
+  }
+
+  body { background: #fff !important; margin: 0; padding: 0; }
+  .no-print { display: none !important; }
+  .navbar   { display: none !important; }
+  .container-fluid.py-3 { display: none !important; }
+
+  .bill-page {
+    width: 100%;
+    margin: 0;
+    border: 1.5px solid #000;
+    page-break-after: avoid;
+    font-size: 8px;
+  }
+
+  .summary-page {
+    width: 100%;
+    margin: 0;
+  }
+}
+
+/* Summary page uses portrait for more rows */
+body.summary-print @media print {
+  @page { size: A4 portrait; }
+}

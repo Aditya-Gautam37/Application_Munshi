@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome — Set up Munshi</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='jl-app.css') }}" rel="stylesheet">
+  <style>
+    body { background: linear-gradient(135deg, #3949ab 0%, #5c6bc0 100%); min-height: 100vh; padding: 2.5rem 0; }
+    .setup-card { background: #fff; border-radius: 14px; box-shadow: 0 14px 40px rgba(0,0,0,0.22); padding: 2.25rem; width: 100%; max-width: 640px; }
+    .setup-brand { display: flex; align-items: center; justify-content: center; gap: 0.6rem; margin-bottom: 0.5rem; }
+    .setup-brand-logo { width: 48px; height: 48px; background: linear-gradient(135deg, #3949ab, #f57c00); border-radius: 11px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 1.25rem; }
+    .setup-brand-name { font-weight: 700; font-size: 1.35rem; }
+    .setup-lead { color: #555; text-align: center; margin-bottom: 1.75rem; }
+    .section-title { font-weight: 700; font-size: 1.05rem; margin: 1.75rem 0 0.25rem; display: flex; align-items: center; gap: 0.5rem; }
+    .section-title .num { width: 26px; height: 26px; border-radius: 50%; background: #eef0fb; color: #3949ab; font-size: 0.85rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+    .section-hint { color: #777; font-size: 0.85rem; margin-bottom: 1rem; }
+    .form-label { font-size: 0.85rem; font-weight: 600; }
+    .req { color: #d32f2f; }
+    .demo-row { border-top: 1px solid #eee; margin-top: 1.75rem; padding-top: 1.25rem; text-align: center; }
+    .demo-hint { color: #888; font-size: 0.82rem; margin-top: 0.5rem; }
+    .pre-lang { display: flex; justify-content: center; gap: 4px; margin-bottom: 1rem; }
+    .pre-lang a { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 999px; text-decoration: none; color: #5c6bc0; border: 1px solid #d5d9ee; }
+    .pre-lang a.is-active { background: #3949ab; color: #fff; border-color: #3949ab; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="setup-card mx-auto">
+      <div class="pre-lang">
+        <a href="{{ url_for('set_lang', code='en') }}" class="{{ 'is-active' if lang != 'hi' else '' }}">English</a>
+        <a href="{{ url_for('set_lang', code='hi') }}" class="{{ 'is-active' if lang == 'hi' else '' }}">हिंदी</a>
+      </div>
+      <div class="setup-brand">
+        <div class="setup-brand-logo">M</div>
+        <div class="setup-brand-name">Munshi</div>
+      </div>
+      <p class="setup-lead">{{ t("Welcome! Let's set up your account. This takes about a minute.") }}</p>
+
+      {% if error %}
+        <div class="alert alert-danger small"><i class="bi bi-exclamation-triangle me-1"></i>{{ error }}</div>
+      {% endif %}
+      {% with msgs = get_flashed_messages() %}
+        {% if msgs %}{% for m in msgs %}<div class="alert alert-warning small">{{ m }}</div>{% endfor %}{% endif %}
+      {% endwith %}
+
+      <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+        <div class="section-title"><span class="num">1</span> {{ t('Your company') }}</div>
+        <div class="section-hint">{{ t('This appears on your bills and challans. You can change it later in Settings.') }}</div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ t('Company / firm name') }} <span class="req">*</span></label>
+          <input type="text" name="company_name" class="form-control" required autofocus
+                 placeholder="e.g. Sharma Roadlines" value="{{ form.company_name or '' }}">
+        </div>
+
+        <div class="row">
+          <div class="col-md-6 mb-3">
+            <label class="form-label">GSTIN</label>
+            <input type="text" name="gstin" class="form-control" maxlength="15"
+                   placeholder="15-character GST number" value="{{ form.gstin or '' }}">
+          </div>
+          <div class="col-md-6 mb-3">
+            <label class="form-label">PAN</label>
+            <input type="text" name="pan" class="form-control" maxlength="10"
+                   placeholder="10-character PAN" value="{{ form.pan or '' }}">
+          </div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ t('Business address') }}</label>
+          <textarea name="address" class="form-control" rows="2"
+                    placeholder="Full address as it should print on bills">{{ form.address or '' }}</textarea>
+        </div>
+
+        <div class="row">
+          <div class="col-md-6 mb-3">
+            <label class="form-label">State code (2-digit)</label>
+            <input type="text" name="state_code" class="form-control" maxlength="2"
+                   placeholder="e.g. 09 for Uttar Pradesh" value="{{ form.state_code or '' }}">
+          </div>
+          <div class="col-md-6 mb-3">
+            <label class="form-label">Phone</label>
+            <input type="text" name="phone" class="form-control"
+                   placeholder="Contact number" value="{{ form.phone or '' }}">
+          </div>
+        </div>
+
+        <div class="section-title"><span class="num">2</span> {{ t('Create your login') }}</div>
+        <div class="section-hint">{{ t('This is the owner (admin) account. Keep the password safe.') }}</div>
+
+        <div class="mb-3">
+          <label class="form-label">{{ t('Username') }} <span class="req">*</span></label>
+          <input type="text" name="username" class="form-control" required
+                 autocomplete="username" placeholder="e.g. owner"
+                 value="{{ form.username or '' }}">
+        </div>
+
+        <div class="row">
+          <div class="col-md-6 mb-3">
+            <label class="form-label">{{ t('Password') }} <span class="req">*</span></label>
+            <input type="password" name="password" class="form-control" required
+                   autocomplete="new-password" placeholder="At least 4 characters">
+          </div>
+          <div class="col-md-6 mb-3">
+            <label class="form-label">{{ t('Confirm password') }} <span class="req">*</span></label>
+            <input type="password" name="confirm_password" class="form-control" required
+                   autocomplete="new-password" placeholder="Type it again">
+          </div>
+        </div>
+
+        <button class="btn btn-primary btn-lg w-100 mt-2" type="submit">
+          <i class="bi bi-check2-circle me-1"></i>{{ t('Finish setup & start') }}
+        </button>
+      </form>
+
+      <div class="demo-row">
+        <form method="post" action="{{ url_for('setup_demo') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-outline-secondary btn-sm" type="submit">
+            <i class="bi bi-eye me-1"></i>{{ t('Just exploring? Load sample demo data') }}
+          </button>
+        </form>
+        <div class="demo-hint">Fills the app with fake sample bills so you can try it out. Sign in as <strong>Demo</strong> / <strong>Demo</strong>.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

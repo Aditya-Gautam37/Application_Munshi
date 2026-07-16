@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}Challan LR-{{ challan.lr_no }} — Munshi{% endblock %}
+{% block content %}
+{% set conf = challan.confidence %}
+
+{% macro field(label, name, value, type='text', help=None, badge=None, classes='') %}
+  {% set lvl = conf.get(name, '') %}
+  {% set yel = 'is-low-conf' if lvl == 'low' else ('is-medium-conf' if lvl == 'medium' else '') %}
+  <div class="{{ classes or 'col-md-6' }}">
+    <label class="form-label small fw-semibold">
+      {{ label }}
+      {% if lvl == 'low' %}<span class="badge bg-warning text-dark ms-1" title="AI was unsure">verify</span>
+      {% elif lvl == 'medium' %}<span class="badge bg-warning-subtle text-dark border ms-1">check</span>
+      {% endif %}
+      {% if badge %}<span class="badge bg-info-subtle text-dark border ms-1">{{ badge }}</span>{% endif %}
+    </label>
+    <input type="{{ type }}" name="{{ name }}" class="form-control form-control-sm {{ yel }}"
+           value="{{ value if value is not none else '' }}" {% if type == 'number' %}step="any"{% endif %}>
+    {% if help %}<small class="text-muted">{{ help }}</small>{% endif %}
+  </div>
+{% endmacro %}
+
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="fw-bold mb-0">
+      <i class="bi bi-clipboard-check me-1"></i>
+      {{ 'Review Draft Challan' if challan.status == 'draft' else 'Challan' }} —
+      LR-{{ challan.lr_no }}
+    </h5>
+    <div class="d-flex gap-2">
+      {% if challan.ledger_entry_id %}
+        <a href="{{ url_for('ledger_view', le_id=challan.ledger_entry_id) }}"
+           class="btn btn-outline-info btn-sm" title="Linked ledger entry">
+          <i class="bi bi-journal-text me-1"></i>Ledger ↗
+        </a>
+      {% endif %}
+      <a href="{{ url_for('challans_index') }}" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left"></i> Back to list
+      </a>
+    </div>
+  </div>
+
+  {% if challan.status == 'draft' %}
+  <div class="alert alert-warning d-flex align-items-center">
+    <i class="bi bi-magic me-2 fs-4"></i>
+    <div>
+      <strong>AI pre-filled this from the uploaded photo.</strong>
+      Verify every field. Yellow-highlighted ones are AI's low-confidence reads.
+    </div>
+  </div>
+  {% endif %}
+
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="row g-3">
+      <!-- LEFT: image preview -->
+      <div class="col-lg-5">
+        {% if challan.source_image %}
+          {% if challan.source_image.lower().endswith('.pdf') %}
+            <embed src="{{ url_for('serve_upload', filename=challan.source_image) }}" type="application/pdf"
+                   style="width:100%; height:80vh; border:1px solid #ccc;">
+          {% else %}
+            <a href="{{ url_for('serve_upload', filename=challan.source_image) }}" target="_blank">
+              <img src="{{ url_for('serve_upload', filename=challan.source_image) }}"
+                   class="img-fluid border rounded" style="max-height:80vh; cursor:zoom-in"
+                   alt="Challan photo">
+            </a>
+            <div class="text-muted small mt-1 text-center">click to enlarge</div>
+          {% endif %}
+        {% else %}
+          <div class="text-muted text-center p-5 border rounded">No source image</div>
+        {% endif %}
+      </div>
+
+      <!-- RIGHT: editable fields -->
+      <div class="col-lg-7">
+        <div class="card mb-3">
+          <div class="card-header bg-dark text-white">Header</div>
+          <div class="card-body">
+            <div class="row g-2">
+              {{ field('LR No.', 'lr_no', challan.lr_no, classes='col-md-4') }}
+              {{ field('Challan Date', 'challan_date', challan.challan_date, 'date', classes='col-md-4') }}
+              {{ field('Truck No.', 'truck_no', challan.truck_no, classes='col-md-4') }}
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header bg-dark text-white">Consignor / Consignee</div>
+          <div class="card-body">
+            <div class="row g-2">
+              {{ field('Consignor', 'consignor_name', challan.consignor_name) }}
+              {{ field('Consignee', 'consignee_name', challan.consignee_name) }}
+              {{ field('Consignor Address', 'consignor_address', challan.consignor_address, classes='col-md-6') }}
+              {{ field('Consignee Address', 'consignee_address', challan.consignee_address, classes='col-md-6') }}
+              {{ field('From City, State', 'from_city_state', challan.from_city_state) }}
+              {{ field('To City, State', 'to_city_state', challan.to_city_state) }}
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header bg-dark text-white">Invoice / Goods</div>
+          <div class="card-body">
+            <div class="row g-2">
+              {{ field('Invoice No.', 'invoice_no', challan.invoice_no, classes='col-md-4') }}
+              {{ field('Invoice Date', 'invoice_date', challan.invoice_date, 'date', classes='col-md-4') }}
+              {{ field('Consignment Value', 'consignment_value', challan.consignment_value, 'number', classes='col-md-4') }}
+              {{ field('No. of Articles', 'no_of_articles', challan.no_of_articles, classes='col-md-4') }}
+              {{ field('Description', 'description', challan.description, classes='col-md-4') }}
+              {{ field('Weight (kg)', 'weight_kg', challan.weight_kg, 'number', classes='col-md-4') }}
+              {{ field('Del. No.', 'del_no', challan.del_no, classes='col-md-3') }}
+              {{ field('PoD Doc No.', 'pod_doc_no', challan.pod_doc_no, classes='col-md-3') }}
+              {{ field('Shipment No.', 'shipment_no', challan.shipment_no, classes='col-md-3') }}
+              {{ field('Cost No.', 'cost_no', challan.cost_no, classes='col-md-3') }}
+              {{ field('Seal No.', 'seal_no', challan.seal_no, classes='col-md-3') }}
+              {{ field('GST Number', 'gst_number', challan.gst_number, classes='col-md-6') }}
+              {{ field('Value of Goods', 'value_of_goods', challan.value_of_goods, 'number', classes='col-md-6') }}
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header bg-dark text-white">Driver &amp; Times</div>
+          <div class="card-body">
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label small fw-semibold">Driver Mobile
+                  {% if conf.get('driver_mobile') == 'low' %}<span class="badge bg-warning text-dark ms-1">verify</span>{% endif %}
+                </label>
+                <input type="text" name="driver_mobile" id="driverMobileInput" class="form-control form-control-sm"
+                       value="{{ challan.driver_mobile or '' }}" list="driversList" autocomplete="off">
+                <datalist id="driversList">
+                  {% for d in drivers %}<option value="{{ d.mobile }}" label="{{ d.name }}">{% endfor %}
+                </datalist>
+                <small class="text-muted">Past drivers auto-suggest by mobile.</small>
+              </div>
+              {{ field('Driver Name', 'driver_name', challan.driver_name) }}
+              {{ field('Gate In Time', 'gate_in_time', challan.gate_in_time, classes='col-md-3') }}
+              {{ field('Gate Out Time', 'gate_out_time', challan.gate_out_time, classes='col-md-3') }}
+              {{ field('Lane Transit Time', 'lane_transit_time', challan.lane_transit_time, classes='col-md-3') }}
+              {{ field('Expected Arrival', 'expected_arrival', challan.expected_arrival, classes='col-md-3') }}
+            </div>
+          </div>
+        </div>
+
+        <div class="d-flex justify-content-end gap-2">
+          <button type="submit" class="btn btn-success">
+            <i class="bi bi-check2-circle me-1"></i>Save Challan
+          </button>
+        </div>
+      </div>
+    </div>
+  </form>
+
+  {% if challan.status != 'draft' %}
+  <!-- Delete is a SEPARATE form (cannot be nested inside the main edit form above) -->
+  <form method="post" action="{{ url_for('challan_delete', challan_id=challan.id) }}"
+        class="d-inline-block mt-2"
+        onsubmit="return confirm('Delete LR-{{ challan.lr_no }} permanently?')">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn btn-outline-danger btn-sm">
+      <i class="bi bi-trash me-1"></i>Delete this challan
+    </button>
+  </form>
+  {% endif %}
+
+  {% include '_activity_log.html' %}
+</div>
+
+<style>
+  .is-low-conf    { background-color:#fff3cd !important; border-color:#ffc107 !important; }
+  .is-medium-conf { background-color:#fff9e6 !important; }
+</style>
+
+<script>
+// When a saved driver's mobile is selected, auto-fill the name field
+const DRIVERS = {{ drivers | tojson }};
+const driversByMobile = {};
+DRIVERS.forEach(d => driversByMobile[d.mobile] = d);
+const mobInput = document.getElementById('driverMobileInput');
+const nameInput = document.querySelector('input[name="driver_name"]');
+if (mobInput && nameInput) {
+  const fill = () => {
+    const d = driversByMobile[(mobInput.value || '').trim()];
+    if (d && (!nameInput.value || nameInput.value.trim() === '')) {
+      nameInput.value = d.name || '';
+    }
+  };
+  mobInput.addEventListener('change', fill);
+  mobInput.addEventListener('input', fill);
+}
+</script>
+{% endblock %}

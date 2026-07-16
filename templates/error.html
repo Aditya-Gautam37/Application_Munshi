@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — Munshi{% endblock %}
+{% block content %}
+<div class="container px-4 py-5" style="max-width:640px">
+  <div class="text-center">
+    <div class="display-1 text-muted">{{ code }}</div>
+    <h2 class="fw-bold mb-3">{{ title }}</h2>
+    <p class="lead text-muted">{{ message }}</p>
+
+    {% if detail %}
+    <details class="text-muted small mt-4">
+      <summary>{{ t('Technical detail') }}</summary>
+      <pre class="bg-light p-3 rounded mt-2 text-start small" style="white-space:pre-wrap">{{ detail }}</pre>
+    </details>
+    {% endif %}
+
+    <div class="mt-4 d-flex justify-content-center gap-2">
+      <a href="{{ url_for('dashboard') }}" class="btn btn-primary">
+        <i class="bi bi-house me-1"></i>{{ t('Dashboard') }}
+      </a>
+      <button onclick="history.back()" class="btn btn-outline-secondary">
+        <i class="bi bi-arrow-left me-1"></i>{{ t('Back') }}
+      </button>
+    </div>
+  </div>
+</div>
+{% endblock %}

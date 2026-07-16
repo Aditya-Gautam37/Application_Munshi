@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% from '_components.html' import page_header, empty, pill %}
+{% block title %}Challans — Munshi{% endblock %}
+{% block content %}
+
+{{ page_header(
+    t('Challans'),
+    t('Trip dispatch register — every LR from creation to billing'),
+    '<a href="' ~ url_for('challan_extract_upload') ~ '" class="btn btn-warning"><i class="bi bi-camera me-1"></i>' ~ t('Extract from Photo') ~ '</a>'
+) }}
+
+{% if challans %}
+<div class="jl-card">
+<div class="table-responsive">
+  <table class="table table-hover align-middle small mb-0 jl-mobile-cards">
+    <thead class="table-light">
+      <tr>
+        <th>{{ t('LR No.') }}</th>
+        <th>{{ t('Date') }}</th>
+        <th>{{ t('Consignor') }}</th>
+        <th>{{ t('Consignee') }}</th>
+        <th>{{ t('Truck') }}</th>
+        <th>{{ t('Driver') }}</th>
+        <th class="text-end">{{ t('Weight') }}</th>
+        <th>{{ t('Status') }}</th>
+        <th class="text-center" style="width:110px"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in challans %}
+      <tr>
+        <td data-label="LR No."><a href="{{ url_for('challan_review', challan_id=c.id) }}" class="fw-semibold">LR-{{ c.lr_no }}</a></td>
+        <td class="text-nowrap" data-label="Date">{{ c.challan_date | date if c.challan_date else '' }}</td>
+        <td data-label="Consignor">{{ c.consignor_name or '' }}</td>
+        <td data-label="Consignee">{{ c.consignee_name or '' }}</td>
+        <td data-label="Truck">{{ c.truck_no or '' }}</td>
+        <td data-label="Driver">{{ c.driver_name or '' }}</td>
+        <td class="text-end" data-label="Weight">{{ '{:,.2f}'.format(c.weight_kg) if c.weight_kg else '' }}</td>
+        <td data-label="Status">
+          {% if c.status == 'draft' %}{{ pill(t('Draft'), 'warning') }}
+          {% elif c.status == 'pod_received' %}{{ pill(t('POD ✓'), 'info') }}
+          {% elif c.status == 'billed' %}{{ pill(t('Billed'), 'success') }}
+          {% else %}{{ pill(t('Open'), 'neutral') }}{% endif %}
+        </td>
+        <td class="text-center">
+          <a href="{{ url_for('challan_review', challan_id=c.id) }}" class="btn btn-sm btn-outline-primary"
+             title="View / Edit"><i class="bi bi-eye"></i></a>
+          <form method="post" action="{{ url_for('challan_delete', challan_id=c.id) }}"
+                class="d-inline" onsubmit="return confirm('Delete LR-{{ c.lr_no }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-sm btn-outline-danger" title="Delete"><i class="bi bi-trash"></i></button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+</div>
+<p class="text-muted small mt-2">
+  {{ challans|length }} challan{{ '' if challans|length == 1 else 's' }} ·
+  Draft → POD received → Billed
+</p>
+{% else %}
+<div class="jl-card">
+{{ empty(
+  t('No challans yet'),
+  t('Each truck dispatch needs an LR. Upload a photo of your handwritten challan and the AI will extract all the details.'),
+  'bi-clipboard2-pulse', t('Upload first challan'), url_for('challan_extract_upload')
+) }}
+</div>
+{% endif %}
+{% endblock %}

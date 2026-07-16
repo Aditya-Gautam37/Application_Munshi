@@ -1,0 +1,64 @@
+{# ── Inline Activity Log panel — collapsible by default ──
+   Usage: {% include '_activity_log.html' %}
+   Expects `audit_entries` in context (a list of dicts from get_audit_for()). #}
+
+{% if audit_entries %}
+<div class="card mt-3 no-print">
+  <div class="card-header bg-light fw-semibold d-flex align-items-center"
+       data-bs-toggle="collapse" data-bs-target="#activityLogPanel"
+       style="cursor: pointer;">
+    <i class="bi bi-clock-history me-2"></i>Activity Log
+    <span class="badge bg-secondary ms-2">{{ audit_entries|length }}</span>
+    <i class="bi bi-chevron-down ms-auto"></i>
+  </div>
+  <div class="collapse" id="activityLogPanel">
+    <div class="table-responsive">
+      <table class="table table-sm small mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>When</th><th>User</th><th>Action</th><th>Summary</th><th>Changes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in audit_entries %}
+          <tr>
+            <td class="text-nowrap">{{ e.occurred_at.replace('T', ' ')[:19] if e.occurred_at else '' }}</td>
+            <td><span class="badge bg-secondary">{{ e.user_name or '—' }}</span></td>
+            <td>
+              {% set color = {'create':'success','update':'warning text-dark','delete':'danger',
+                              'pod_mark':'info text-dark','paid_mark':'primary',
+                              'client_paid':'primary'}.get(e.action, 'secondary') %}
+              <span class="badge bg-{{ color }}">{{ e.action }}</span>
+            </td>
+            <td>{{ e.summary or '' }}</td>
+            <td>
+              {% set parsed = e.changes %}
+              {% if parsed %}
+                {% set parsed_obj = parsed | from_json %}
+                {% if parsed_obj %}
+                  <details>
+                    <summary class="text-muted">{{ parsed_obj.keys()|length }} field{{ '' if parsed_obj.keys()|length == 1 else 's' }}</summary>
+                    <table class="table table-sm mb-0 mt-1" style="font-size:11px">
+                      <tbody>
+                        {% for k, v in parsed_obj.items() %}
+                        <tr>
+                          <td class="text-muted">{{ k }}</td>
+                          <td><span class="text-danger">{{ v[0] if v[0] is not none else '∅' }}</span></td>
+                          <td>→</td>
+                          <td><span class="text-success">{{ v[1] if v[1] is not none else '∅' }}</span></td>
+                        </tr>
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </details>
+                {% endif %}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}

@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}Munshi{% endblock %}</title>
+  {# Set the theme BEFORE CSS loads to avoid a white flash on dark-mode pages #}
+  <script>
+    (function() {
+      try {
+        var t = localStorage.getItem('jl-theme');
+        if (!t) {
+          t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) {}
+    })();
+  </script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+  <link href="{{ url_for('static', filename='jl-app.css') }}" rel="stylesheet">
+</head>
+<body>
+{% set active = (request.endpoint or '') %}
+
+{% macro nav_item(endpoint_prefix, icon, label, url, badge=None, badge_class='warning') %}
+  {% set is_active = active == endpoint_prefix or active.startswith(endpoint_prefix + '_') or active.startswith(endpoint_prefix + '/') %}
+  <a href="{{ url }}" class="{{ 'active' if is_active else '' }}">
+    <i class="bi {{ icon }}"></i>
+    <span class="flex-grow-1">{{ label }}</span>
+    {% if badge %}<span class="jl-pill {{ badge_class }}" style="font-size:10px">{{ badge }}</span>{% endif %}
+  </a>
+{% endmacro %}
+
+<div class="jl-app no-print">
+
+  <!-- ═══ SIDEBAR ═══ -->
+  <aside class="jl-sidebar" id="jlSidebar">
+    <a href="{{ url_for('dashboard') }}" class="jl-brand">
+      <span class="jl-brand-logo"><i class="bi bi-truck"></i></span>
+      <span class="jl-brand-text">
+        Munshi
+        <small>SANDBOX · :5056</small>
+      </span>
+    </a>
+
+    <div class="jl-sidebar-section">{{ t('Overview') }}</div>
+    <nav class="jl-nav">
+      {{ nav_item('dashboard',         'bi-speedometer2',         t('Dashboard'),     url_for('dashboard')) }}
+    </nav>
+
+    <div class="jl-sidebar-section">{{ t('Operations') }}</div>
+    <nav class="jl-nav">
+      {{ nav_item('challans_index',    'bi-clipboard2-pulse',     t('Challans'),      url_for('challans_index')) }}
+      {{ nav_item('ledger_index',      'bi-journal-text',         t('Ledger'),        url_for('ledger_index')) }}
+      {{ nav_item('ready_to_bill',     'bi-receipt-cutoff',       t('Ready to Bill'), url_for('ready_to_bill')) }}
+      {{ nav_item('index',             'bi-receipt',              t('Bills'),         url_for('index')) }}
+      {{ nav_item('trip_lookup',       'bi-truck-front',          t('Trip 360'),      url_for('trip_lookup')) }}
+    </nav>
+
+    <div class="jl-sidebar-section">{{ t('Money') }}</div>
+    <nav class="jl-nav">
+      {{ nav_item('payments_hub',      'bi-cash-stack',           t('Payments'),      url_for('payments_hub')) }}
+      {{ nav_item('summary',           'bi-file-earmark-spreadsheet',t('Bill Summary'), url_for('summary')) }}
+    </nav>
+
+    <div class="jl-sidebar-section">{{ t('Reports') }}</div>
+    <nav class="jl-nav">
+      {{ nav_item('report_diesel',         'bi-fuel-pump',  t('Diesel Summary'),     url_for('report_diesel')) }}
+      {{ nav_item('report_transporters',   'bi-truck-flatbed',t('Transporter Statement'), url_for('report_transporters')) }}
+    </nav>
+
+    <div class="jl-sidebar-section">{{ t('Manage') }}</div>
+    <nav class="jl-nav">
+      {{ nav_item('masters_index',     'bi-database',             t('Masters'),       url_for('masters_index')) }}
+      {{ nav_item('rate_list_editor',  'bi-cash-coin',            t('Rate List'),     url_for('rate_list_editor')) }}
+      {{ nav_item('audit_log_view',    'bi-clock-history',        t('Activity Log'),  url_for('audit_log_view')) }}
+      {{ nav_item('recycle_bin',       'bi-trash3',               t('Recycle Bin'),   url_for('recycle_bin')) }}
+      {% if is_admin %}
+      {{ nav_item('users_index',       'bi-people',               t('Users'),         url_for('users_index')) }}
+      {{ nav_item('license_page',      'bi-shield-check',         t('License'),       url_for('license_page')) }}
+      {% endif %}
+      {{ nav_item('settings',          'bi-gear',                 t('Settings'),      url_for('settings')) }}
+    </nav>
+
+    <div class="jl-sidebar-footer">
+      Munshi v1.0<br>
+      <a href="/health" target="_blank" style="color:rgba(255,255,255,0.6)">{{ t('System Health') }}</a>
+    </div>
+  </aside>
+
+  <!-- ═══ MAIN AREA (topbar + content) ═══ -->
+  <div class="jl-main" id="jlMain">
+
+    <!-- Topbar -->
+    <header class="jl-topbar">
+      <button class="jl-topbar-toggle" id="jlSidebarToggle" title="Toggle sidebar">
+        <i class="bi bi-list"></i>
+      </button>
+
+      <!-- Global search -->
+      <div class="jl-search">
+        <i class="bi bi-search"></i>
+        <input type="text" id="jlSearchInput" autocomplete="off"
+               placeholder="{{ t('Search bills, challans, ledger, clients…') }}">
+        <div class="jl-search-results" id="jlSearchResults"></div>
+      </div>
+
+      <div class="jl-topbar-spacer"></div>
+
+      <!-- Language toggle (English / Hindi) -->
+      <div class="jl-lang-switch" title="{{ t('Language') }} / भाषा">
+        <a href="{{ url_for('set_lang', code='en') }}"
+           class="jl-lang-opt {{ 'is-active' if lang != 'hi' else '' }}">English</a>
+        <a href="{{ url_for('set_lang', code='hi') }}"
+           class="jl-lang-opt {{ 'is-active' if lang == 'hi' else '' }}">हिंदी</a>
+      </div>
+
+      <!-- Floating Create -->
+      <div class="jl-fab">
+        <button class="jl-fab-button" id="jlFabBtn">
+          <i class="bi bi-plus-lg"></i>
+          <span>{{ t('Create') }}</span>
+        </button>
+        <div class="jl-fab-menu" id="jlFabMenu">
+          <a href="#" id="jlQuickLedgerLink"><i class="bi bi-lightning-charge"></i>{{ t('Quick Ledger Entry') }}</a>
+          <a href="{{ url_for('extract_upload') }}"><i class="bi bi-camera"></i>{{ t('VBL → Bill (AI)') }}</a>
+          <a href="{{ url_for('challan_extract_upload') }}"><i class="bi bi-clipboard2-pulse"></i>{{ t('Challan from Photo') }}</a>
+          <a href="{{ url_for('ledger_extract_upload') }}"><i class="bi bi-journal-text"></i>{{ t('Ledger Page from Photo') }}</a>
+          <a href="{{ url_for('new_bill') }}"><i class="bi bi-receipt"></i>{{ t('Manual Bill') }}</a>
+          <a href="{{ url_for('ledger_new') }}"><i class="bi bi-pencil-square"></i>{{ t('Full Ledger Entry') }}</a>
+        </div>
+      </div>
+
+      <!-- Theme toggle (light / dark) -->
+      <button class="jl-bell" id="jlThemeToggle" title="Toggle light / dark mode" type="button">
+        <i class="bi bi-sun-fill" id="jlThemeIconLight"></i>
+        <i class="bi bi-moon-stars-fill" id="jlThemeIconDark" style="display:none"></i>
+      </button>
+
+      <!-- Notification bell -->
+      <div style="position:relative">
+        <button class="jl-bell" id="jlBellBtn" title="Notifications">
+          <i class="bi bi-bell"></i>
+          {% if notifications and notifications.total > 0 %}
+            <span class="badge-count">{{ notifications.total }}</span>
+          {% endif %}
+        </button>
+        <div class="jl-bell-panel" id="jlBellPanel">
+          <div class="jl-bell-panel-header">{{ t('Notifications') }}</div>
+          <div class="jl-bell-panel-list">
+            {% if notifications and notifications.entries %}
+              {% for n in notifications.entries %}
+              <a href="{{ n.link }}" class="jl-bell-item">
+                <div class="jl-bell-item-icon" style="background: var(--jl-{{ n.color or 'info' }}-bg); color: var(--jl-{{ n.color or 'info' }});">
+                  <i class="bi {{ n.icon }}"></i>
+                </div>
+                <div class="jl-bell-item-content">
+                  <div class="jl-bell-item-title">{{ n.title }}</div>
+                  <div class="jl-bell-item-meta">{{ n.meta }}</div>
+                </div>
+              </a>
+              {% endfor %}
+            {% else %}
+              <div style="padding: 24px 18px; text-align: center; color: var(--jl-text-muted); font-size: 13px;">
+                <i class="bi bi-check2-circle fs-3 d-block mb-2 text-success"></i>
+                {{ t('All caught up — no pending alerts.') }}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Signed-in user + menu -->
+      <div class="jl-user-picker dropdown">
+        <button class="btn btn-link p-0 d-flex align-items-center gap-2 text-decoration-none"
+                data-bs-toggle="dropdown" aria-expanded="false" style="color: inherit">
+          <div class="jl-user-avatar">{{ (current_user or '?')[:1] }}</div>
+          <span class="d-none d-md-inline small fw-semibold">{{ current_user or t('Sign in') }}</span>
+          {% if is_admin %}<span class="badge bg-warning text-dark small">admin</span>{% endif %}
+          <i class="bi bi-chevron-down small"></i>
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><span class="dropdown-item-text small text-muted">{{ t('Signed in as') }} <strong>{{ current_user }}</strong></span></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><a class="dropdown-item" href="{{ url_for('change_password') }}"><i class="bi bi-key me-1"></i>{{ t('Change password') }}</a></li>
+          <li><a class="dropdown-item text-danger" href="{{ url_for('logout') }}"><i class="bi bi-box-arrow-right me-1"></i>{{ t('Sign out') }}</a></li>
+        </ul>
+      </div>
+    </header>
+
+    <!-- Backdrop for mobile -->
+    <div class="jl-sidebar-backdrop" id="jlSidebarBackdrop"></div>
+
+    <!-- Quick ledger entry modal (only the 6 essential fields) -->
+    <div id="jlQuickLedgerModal" class="jl-shortcut-sheet" style="display:none">
+      <div class="jl-shortcut-sheet-card" style="max-width:560px">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h5 class="mb-0"><i class="bi bi-lightning-charge me-2"></i>{{ t('Quick Ledger Entry') }}</h5>
+          <button type="button" class="btn-close" id="jlQuickLedgerClose"></button>
+        </div>
+        <p class="text-muted small mb-3">
+          {{ t('The 6 fields you need most. Open the full editor anytime to add diesel, advances, transporter, etc.') }}
+        </p>
+        <form method="post" action="{{ url_for('ledger_new') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="trip_type" value="One Way">
+          <input type="hidden" name="advance_account" value="0">
+          <input type="hidden" name="diesel" value="0">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">{{ t('Date') }} *</label>
+              <input type="date" name="entry_date" class="form-control" required
+                     value="{{ now_date if now_date else '' }}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">{{ t('GR No.') }}</label>
+              <input type="text" name="gr_no" class="form-control" placeholder="e.g. 12527">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">{{ t('Vehicle No.') }} *</label>
+              <input type="text" name="vehicle_no" class="form-control" required
+                     placeholder="UP78AT8509" style="text-transform:uppercase">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">{{ t('Station / Destination') }}</label>
+              <input type="text" name="station" class="form-control" placeholder="Bindki">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">{{ t('Freight (₹)') }}</label>
+              <input type="number" step="0.01" name="freight" class="form-control" placeholder="6000">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small fw-semibold">{{ t('Advance Cash (₹)') }}</label>
+              <input type="number" step="0.01" name="advance_cash" class="form-control" placeholder="1500">
+            </div>
+          </div>
+          <div class="mt-3 d-flex gap-2 justify-content-end">
+            <button type="button" class="btn btn-outline-secondary" id="jlQuickLedgerCancel">{{ t('Cancel') }}</button>
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-check-circle me-1"></i>{{ t('Save & Open') }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Keyboard shortcut cheat sheet (modal-like overlay, opens with `?`) -->
+    <div id="jlShortcutSheet" class="jl-shortcut-sheet" style="display:none">
+      <div class="jl-shortcut-sheet-card">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h5 class="mb-0"><i class="bi bi-keyboard me-2"></i>Keyboard shortcuts</h5>
+          <button type="button" class="btn-close" id="jlShortcutClose"></button>
+        </div>
+        <div class="row g-3 small">
+          <div class="col-md-6">
+            <div class="fw-semibold text-muted text-uppercase small mb-2" style="letter-spacing:0.04em">Navigation</div>
+            <div class="jl-shortcut-row"><kbd>g</kbd> <kbd>d</kbd> <span>Go to Dashboard</span></div>
+            <div class="jl-shortcut-row"><kbd>g</kbd> <kbd>l</kbd> <span>Go to Ledger</span></div>
+            <div class="jl-shortcut-row"><kbd>g</kbd> <kbd>c</kbd> <span>Go to Challans</span></div>
+            <div class="jl-shortcut-row"><kbd>g</kbd> <kbd>b</kbd> <span>Go to Bills</span></div>
+            <div class="jl-shortcut-row"><kbd>g</kbd> <kbd>p</kbd> <span>Go to Payments</span></div>
+            <div class="jl-shortcut-row"><kbd>g</kbd> <kbd>t</kbd> <span>Go to Trip 360</span></div>
+          </div>
+          <div class="col-md-6">
+            <div class="fw-semibold text-muted text-uppercase small mb-2" style="letter-spacing:0.04em">Actions</div>
+            <div class="jl-shortcut-row"><kbd>/</kbd> <span>Focus search</span></div>
+            <div class="jl-shortcut-row"><kbd>n</kbd> <span>Open "+ Create" menu</span></div>
+            <div class="jl-shortcut-row"><kbd>b</kbd> <span>Toggle notifications</span></div>
+            <div class="jl-shortcut-row"><kbd>t</kbd> <span>Toggle light / dark</span></div>
+            <div class="jl-shortcut-row"><kbd>Esc</kbd> <span>Close panel / cancel</span></div>
+            <div class="jl-shortcut-row"><kbd>?</kbd> <span>Show this cheat sheet</span></div>
+          </div>
+        </div>
+        <div class="mt-3 small text-muted">
+          Shortcuts are disabled while typing in form fields. <kbd>g</kbd>+letter is a chord — press <kbd>g</kbd>, then the next letter within 1 second.
+        </div>
+      </div>
+    </div>
+
+    <!-- Page content -->
+    <main class="jl-content">
+
+      {# ── License status banner (only shown when not active) ── #}
+      {% if license_state and license_state.status and license_state.status not in ('active', 'unconfigured') and request.endpoint != 'license_page' %}
+        {% set ls = license_state %}
+        {% set tone = {
+          'grace':     'warning',
+          'locked':    'danger',
+          'expired':   'danger',
+          'suspended': 'danger',
+          'not_found': 'danger',
+        }.get(ls.status, 'info') %}
+        <div class="alert alert-{{ tone }} d-flex align-items-center" role="alert" style="border-radius:10px">
+          <i class="bi bi-{{ 'shield-lock' if tone == 'danger' else 'shield-exclamation' }} fs-4 me-2"></i>
+          <div class="flex-grow-1">
+            <strong>
+              {% if ls.status == 'grace' %}{{ t('Your license expires soon —') }}
+              {% elif ls.status == 'locked' %}{{ t('Read-only mode —') }}
+              {% elif ls.status == 'suspended' %}{{ t('License suspended —') }}
+              {% elif ls.status == 'not_found' %}{{ t('License key not recognised —') }}
+              {% else %}{{ t('License expired —') }}
+              {% endif %}
+            </strong>
+            {{ ls.message or '' }}
+          </div>
+          <a href="{{ url_for('license_page') }}" class="btn btn-sm btn-{{ tone }}">{{ t('Open License') }}</a>
+        </div>
+      {% endif %}
+
+      {# ── Google Drive reauth banner (only when Google revoked our access) ── #}
+      {% if drive_state and drive_state.last_sync_status == 'reauth_required' and request.endpoint != 'settings' %}
+        <div class="alert alert-danger d-flex align-items-center" role="alert" style="border-radius:10px">
+          <i class="bi bi-cloud-slash fs-4 me-2"></i>
+          <div class="flex-grow-1">
+            <strong>{{ t('Google Drive backup paused —') }}</strong>
+            {{ t('Google revoked our access. Daily backups are not uploading. Reconnect to resume.') }}
+          </div>
+          <a href="{{ url_for('drive_connect') }}" class="btn btn-sm btn-danger">{{ t('Reconnect') }}</a>
+        </div>
+      {% endif %}
+
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          {% for msg in messages %}
+            <div class="alert alert-info alert-dismissible fade show" role="alert">
+              {{ msg }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+
+      {% block content %}{% endblock %}
+    </main>
+
+  </div>
+</div>
+
+<!-- Extraction overlay (unchanged) -->
+<div id="extractOverlay" class="ai-overlay" style="display:none">
+  <div class="ai-card">
+    <div class="ai-glow"></div>
+    <div class="ai-doc-stack">
+      <div class="ai-doc"></div><div class="ai-doc"></div><div class="ai-doc"></div>
+      <div class="ai-scanline"></div>
+    </div>
+    <h5 class="ai-title mt-4 mb-1" id="aiTitle">Reading document</h5>
+    <p class="ai-stage text-muted mb-0" id="aiStage">Uploading photo…</p>
+    <div class="ai-steps">
+      <div class="ai-step active" data-step="1"><span></span>Upload</div>
+      <div class="ai-step"        data-step="2"><span></span>AI&nbsp;reads</div>
+      <div class="ai-step"        data-step="3"><span></span>Extract&nbsp;fields</div>
+      <div class="ai-step"        data-step="4"><span></span>Build&nbsp;review</div>
+    </div>
+    <div class="ai-elapsed" id="aiElapsed">elapsed: 0s</div>
+    <div class="ai-hint text-muted small mt-2">Powered by Gemini · usually 3–10 sec</div>
+  </div>
+</div>
+
+<style>
+  .ai-overlay { position: fixed; inset: 0; z-index: 9999;
+    background: radial-gradient(ellipse at top, rgba(57,73,171,0.18) 0%, rgba(0,0,0,0.85) 70%);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    display: flex; align-items: center; justify-content: center;
+    animation: aiFadeIn 0.25s ease-out; }
+  @keyframes aiFadeIn { from { opacity: 0 } to { opacity: 1 } }
+  .ai-card { background: linear-gradient(180deg, #ffffff 0%, #f8f9fc 100%);
+    padding: 2.5rem 3rem 2rem; border-radius: 18px;
+    box-shadow: 0 25px 70px rgba(0,0,0,0.5);
+    min-width: 380px; max-width: 90vw; text-align: center;
+    position: relative; overflow: hidden; }
+  .ai-glow { position: absolute; top: -60px; left: 50%; transform: translateX(-50%);
+    width: 250px; height: 250px;
+    background: radial-gradient(circle, rgba(57,73,171,0.25) 0%, transparent 70%);
+    animation: aiGlowPulse 3s ease-in-out infinite; pointer-events: none; }
+  @keyframes aiGlowPulse { 0%,100% { opacity:0.6; transform:translateX(-50%) scale(1); } 50% { opacity:1; transform:translateX(-50%) scale(1.15); } }
+  .ai-doc-stack { position: relative; width: 110px; height: 130px; margin: 0 auto; }
+  .ai-doc { position: absolute; left: 50%; top: 0; width: 80px; height: 100px;
+    background: white; border: 1.5px solid #c8d0e0; border-radius: 6px;
+    transform-origin: 50% 100%; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+  .ai-doc::before, .ai-doc::after { content: ''; position: absolute; left: 12px; right: 12px; height: 3px; background: #d4dbe8; border-radius: 2px; }
+  .ai-doc::before { top: 16px; }
+  .ai-doc::after { top: 26px; right: 28px; }
+  .ai-doc:nth-child(1) { transform: translateX(-50%) translateX(-18px) rotate(-12deg); animation: aiDocFloat 3s ease-in-out infinite; }
+  .ai-doc:nth-child(2) { transform: translateX(-50%) translateX(-2px) rotate(0deg); animation: aiDocFloat 3s ease-in-out infinite 0.3s; z-index: 2; }
+  .ai-doc:nth-child(3) { transform: translateX(-50%) translateX(14px) rotate(11deg); animation: aiDocFloat 3s ease-in-out infinite 0.6s; }
+  @keyframes aiDocFloat { 0%,100% { translate:0 0; } 50% { translate:0 -8px; } }
+  .ai-scanline { position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+    width: 90px; height: 2px;
+    background: linear-gradient(90deg, transparent 0%, #3949ab 50%, transparent 100%);
+    box-shadow: 0 0 12px #3949ab, 0 0 24px #3949ab;
+    animation: aiScan 1.6s ease-in-out infinite; z-index: 5; }
+  @keyframes aiScan { 0% { top: 5px; opacity: 0; } 20% { opacity: 1; } 80% { opacity: 1; } 100% { top: 95px; opacity: 0; } }
+  .ai-title { font-weight: 700; color: #1a1a2e; }
+  .ai-stage { min-height: 1.4em; font-size: 0.875rem; transition: opacity 0.25s; }
+  .ai-steps { display: flex; justify-content: space-between; margin: 1.5rem 0 0.5rem; font-size: 11px; color: #94a3b8; gap: 0.5rem; }
+  .ai-step { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: color 0.3s; }
+  .ai-step span { width: 10px; height: 10px; border-radius: 50%; background: #d4dbe8; transition: background 0.3s, transform 0.3s, box-shadow 0.3s; }
+  .ai-step.active { color: #3949ab; font-weight: 600; }
+  .ai-step.active span { background: #3949ab; transform: scale(1.4); box-shadow: 0 0 0 3px rgba(57,73,171,0.2); }
+  .ai-step.done span { background: #198754; }
+  .ai-elapsed { font-size: 11px; color: #94a3b8; font-variant-numeric: tabular-nums; margin-top: 0.5rem; }
+  .ai-hint { font-size: 11px; }
+
+  /* ── Language toggle (English | हिंदी) ── */
+  .jl-lang-switch { display: inline-flex; align-items: center; gap: 2px;
+    background: var(--jl-surface-2, rgba(0,0,0,0.05)); border: 1px solid var(--jl-divider, #e2e6ee);
+    border-radius: 999px; padding: 2px; margin-right: 4px; white-space: nowrap; }
+  .jl-lang-opt { font-size: 12px; font-weight: 600; line-height: 1;
+    padding: 5px 10px; border-radius: 999px; text-decoration: none;
+    color: var(--jl-text-muted, #6b7280); transition: background 0.15s, color 0.15s; }
+  .jl-lang-opt:hover { color: var(--jl-text, #1a1a2e); }
+  .jl-lang-opt.is-active { background: var(--jl-primary, #3949ab); color: #fff; }
+  @media (max-width: 640px) { .jl-lang-opt { padding: 5px 8px; font-size: 11px; } }
+</style>
+
+<script>
+  // ── Sidebar toggle ──
+  (function() {
+    const sidebar  = document.getElementById('jlSidebar');
+    const main     = document.getElementById('jlMain');
+    const toggle   = document.getElementById('jlSidebarToggle');
+    const backdrop = document.getElementById('jlSidebarBackdrop');
+    const isMobile = () => window.innerWidth < 900;
+
+    // Restore collapsed state from localStorage
+    const collapsed = localStorage.getItem('jl_sidebar_collapsed') === '1';
+    if (collapsed && !isMobile()) {
+      sidebar.classList.add('collapsed');
+      main.classList.add('sidebar-collapsed');
+    }
+
+    toggle.addEventListener('click', () => {
+      if (isMobile()) {
+        sidebar.classList.toggle('open');
+        backdrop.classList.toggle('open');
+      } else {
+        const c = sidebar.classList.toggle('collapsed');
+        main.classList.toggle('sidebar-collapsed', c);
+        localStorage.setItem('jl_sidebar_collapsed', c ? '1' : '0');
+      }
+    });
+    backdrop.addEventListener('click', () => {
+      sidebar.classList.remove('open');
+      backdrop.classList.remove('open');
+    });
+  })();
+
+  // ── Floating Create dropdown ──
+  (function() {
+    const btn = document.getElementById('jlFabBtn');
+    const menu = document.getElementById('jlFabMenu');
+    if (!btn || !menu) return;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      menu.classList.toggle('open');
+      document.getElementById('jlBellPanel')?.classList.remove('open');
+    });
+    document.addEventListener('click', e => {
+      if (!menu.contains(e.target)) menu.classList.remove('open');
+    });
+  })();
+
+  // ── Notification bell ──
+  (function() {
+    const btn = document.getElementById('jlBellBtn');
+    const panel = document.getElementById('jlBellPanel');
+    if (!btn || !panel) return;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      panel.classList.toggle('open');
+      document.getElementById('jlFabMenu')?.classList.remove('open');
+    });
+    document.addEventListener('click', e => {
+      if (!panel.contains(e.target) && e.target !== btn) panel.classList.remove('open');
+    });
+  })();
+
+  // ── Theme toggle (light/dark) — boot script in <head> already applied stored choice ──
+  (function() {
+    const btn = document.getElementById('jlThemeToggle');
+    const iconLight = document.getElementById('jlThemeIconLight');
+    const iconDark  = document.getElementById('jlThemeIconDark');
+    if (!btn) return;
+
+    function syncIcon() {
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      // Show the icon for the *other* mode (so user knows what clicking does)
+      iconLight.style.display = isDark ? '' : 'none';   // sun = "switch to light"
+      iconDark.style.display  = isDark ? 'none' : '';   // moon = "switch to dark"
+      btn.title = isDark ? 'Switch to light mode' : 'Switch to dark mode';
+    }
+    syncIcon();
+
+    btn.addEventListener('click', () => {
+      const html = document.documentElement;
+      // Briefly enable transitions for a smooth swap
+      html.classList.add('jl-theme-transition');
+      const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      if (next === 'dark') html.setAttribute('data-theme', 'dark');
+      else html.removeAttribute('data-theme');
+      try { localStorage.setItem('jl-theme', next); } catch (e) {}
+      syncIcon();
+      setTimeout(() => html.classList.remove('jl-theme-transition'), 250);
+    });
+  })();
+
+  // ── Quick Ledger Entry modal ──
+  (function() {
+    const open = document.getElementById('jlQuickLedgerLink');
+    const modal = document.getElementById('jlQuickLedgerModal');
+    const closeBtn = document.getElementById('jlQuickLedgerClose');
+    const cancelBtn = document.getElementById('jlQuickLedgerCancel');
+    if (!open || !modal) return;
+    function show() {
+      modal.style.display = 'flex';
+      // Pre-fill today's date if empty
+      const dateInp = modal.querySelector('input[name="entry_date"]');
+      if (dateInp && !dateInp.value) {
+        const t = new Date();
+        dateInp.value = t.getFullYear() + '-' +
+                        String(t.getMonth() + 1).padStart(2, '0') + '-' +
+                        String(t.getDate()).padStart(2, '0');
+      }
+      // Focus the vehicle field — most users already know the truck before opening
+      modal.querySelector('input[name="vehicle_no"]')?.focus();
+      // Close FAB menu if open
+      document.getElementById('jlFabMenu')?.classList.remove('open');
+    }
+    function hide() { modal.style.display = 'none'; }
+    open.addEventListener('click', e => { e.preventDefault(); show(); });
+    closeBtn.addEventListener('click', hide);
+    cancelBtn.addEventListener('click', hide);
+    modal.addEventListener('click', e => { if (e.target === modal) hide(); });
+  })();
+
+  // ── Keyboard shortcuts ──
+  (function() {
+    const NAV = {
+      d: '{{ url_for("dashboard") }}',
+      l: '{{ url_for("ledger_index") }}',
+      c: '{{ url_for("challans_index") }}',
+      b: '{{ url_for("index") }}',
+      p: '{{ url_for("payments_hub") }}',
+      t: '{{ url_for("trip_lookup") }}',
+    };
+    const sheet = document.getElementById('jlShortcutSheet');
+    const sheetClose = document.getElementById('jlShortcutClose');
+    let chord = null, chordTimer = null;
+
+    function inField(e) {
+      const t = e.target;
+      if (!t) return false;
+      const tag = (t.tagName || '').toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable;
+    }
+    function closeSheet() { if (sheet) sheet.style.display = 'none'; }
+    sheetClose && sheetClose.addEventListener('click', closeSheet);
+    sheet && sheet.addEventListener('click', e => { if (e.target === sheet) closeSheet(); });
+
+    document.addEventListener('keydown', e => {
+      // Esc always works (close panels, sheet, dropdowns)
+      if (e.key === 'Escape') {
+        closeSheet();
+        document.getElementById('jlBellPanel')?.classList.remove('open');
+        document.getElementById('jlFabMenu')?.classList.remove('open');
+        document.getElementById('jlSearchResults')?.classList.remove('open');
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        return;
+      }
+      if (inField(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+
+      // Chord (g + letter) for navigation
+      if (chord === 'g') {
+        const url = NAV[e.key];
+        clearTimeout(chordTimer); chord = null;
+        if (url) { e.preventDefault(); window.location = url; }
+        return;
+      }
+
+      switch (e.key) {
+        case '?':
+          e.preventDefault();
+          if (sheet) sheet.style.display = 'flex';
+          break;
+        case '/':
+          e.preventDefault();
+          document.getElementById('jlSearchInput')?.focus();
+          break;
+        case 'g':
+          chord = 'g';
+          clearTimeout(chordTimer);
+          chordTimer = setTimeout(() => { chord = null; }, 1000);
+          break;
+        case 'n':
+          e.preventDefault();
+          document.getElementById('jlFabBtn')?.click();
+          break;
+        case 'b':
+          e.preventDefault();
+          document.getElementById('jlBellBtn')?.click();
+          break;
+        case 't':
+          e.preventDefault();
+          document.getElementById('jlThemeToggle')?.click();
+          break;
+      }
+    });
+  })();
+
+  // ── Global search (debounced fetch /api/search?q=) ──
+  (function() {
+    const input = document.getElementById('jlSearchInput');
+    const results = document.getElementById('jlSearchResults');
+    if (!input || !results) return;
+    let timer = null;
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (q.length < 2) { results.classList.remove('open'); results.innerHTML = ''; return; }
+      timer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+          const data = await r.json();
+          renderResults(data);
+        } catch (e) {
+          results.innerHTML = '<div class="empty">Search failed</div>';
+          results.classList.add('open');
+        }
+      }, 200);
+    });
+    function renderResults(data) {
+      const groups = [
+        ['Bills',     data.bills],
+        ['Challans',  data.challans],
+        ['Ledger',    data.ledger],
+        ['Clients',   data.clients],
+      ];
+      let html = '';
+      let total = 0;
+      for (const [label, items] of groups) {
+        if (!items || !items.length) continue;
+        html += `<div class="group-label">${label}</div>`;
+        for (const it of items) {
+          html += `<a href="${it.link}"><strong>${it.title}</strong>${it.subtitle ? ' · ' + it.subtitle : ''}</a>`;
+          total++;
+        }
+      }
+      if (!total) html = '<div class="empty">No matches</div>';
+      results.innerHTML = html;
+      results.classList.add('open');
+    }
+    document.addEventListener('click', e => {
+      if (!input.parentElement.contains(e.target)) results.classList.remove('open');
+    });
+  })();
+
+  // ── AI extraction overlay (re-bound from previous version) ──
+  (function() {
+    const overlay = document.getElementById('extractOverlay');
+    const titleEl = document.getElementById('aiTitle');
+    const stageEl = document.getElementById('aiStage');
+    const elapsedEl = document.getElementById('aiElapsed');
+    if (!overlay) return;
+    const STAGES = [
+      { delay: 0,     text: 'Uploading photo…',                                       step: 1 },
+      { delay: 1500,  text: 'Sending to Gemini Flash…',                                step: 2 },
+      { delay: 3500,  text: 'AI is reading the document…',                            step: 2 },
+      { delay: 6000,  text: 'Extracting fields…',                                     step: 3 },
+      { delay: 9000,  text: 'Building review screen…',                                step: 4 },
+      { delay: 14000, text: 'Large or complex image — give it a few more seconds',    step: 4 },
+      { delay: 20000, text: 'AI is still reading — handwritten / dense pages take longer', step: 2 },
+      { delay: 35000, text: 'Still working — dense pages can take 40–60 seconds',     step: 2 },
+      { delay: 55000, text: 'Almost there — should finish within the next 15–20s',    step: 2 },
+    ];
+    function setStep(n) {
+      document.querySelectorAll('.ai-step').forEach(el => {
+        const s = parseInt(el.dataset.step);
+        el.classList.toggle('done',   s < n);
+        el.classList.toggle('active', s === n);
+      });
+    }
+    window.showExtractOverlay = function(title) {
+      titleEl.textContent = title || 'Reading document';
+      stageEl.textContent = STAGES[0].text;
+      setStep(STAGES[0].step);
+      overlay.style.display = 'flex';
+      const startedAt = Date.now();
+      STAGES.forEach((s) => {
+        setTimeout(() => {
+          if (overlay.style.display === 'none') return;
+          stageEl.style.opacity = '0';
+          setTimeout(() => {
+            stageEl.textContent = s.text;
+            setStep(s.step);
+            stageEl.style.opacity = '1';
+          }, 200);
+        }, s.delay);
+      });
+      const tick = setInterval(() => {
+        if (overlay.style.display === 'none') { clearInterval(tick); return; }
+        const sec = Math.floor((Date.now() - startedAt) / 1000);
+        elapsedEl.textContent = `elapsed: ${sec}s`;
+      }, 250);
+    };
+  })();
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
