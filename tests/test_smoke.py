@@ -352,3 +352,97 @@ def test_gst_split_inter_state_is_igst():
     assert out["sgst_amount"] == 0
     assert out["total_tax"] == 500
     assert out["grand_total"] == 10500
+
+
+# ── (F3) A bill number already taken by drifted data must NOT crash the save ───
+#
+# The `next_bill_number` counter can fall behind the real data — after loading
+# demo/sample data, importing/restoring bills, manual DB edits, or a genuinely
+# concurrent save. Before the fix, the next save hit `bills.bill_no UNIQUE` and
+# blew up with an IntegrityError → 500. The save must instead skip the taken
+# number, assign the next free one, and persist cleanly (no 500, no duplicate).
+def test_bill_number_collision_does_not_500(client):
+    _login_ready(client)
+
+    # First real bill → JL-0001, counter advances to 2.
+    r1 = _create_bill(client, "DRIFT CO", 1000)
+    assert r1.status_code in (301, 302)
+
+    # Simulate counter drift: inject the exact number the counter would hand out
+    # next (JL-0002) directly, as demo/imported data would.
+    conn = appmod.get_db()
+    n = int(appmod.get_setting("next_bill_number") or 1)
+    conn.execute(
+        "INSERT INTO bills (bill_no, created_at) VALUES (?,?)",
+        (f"JL-{n:04d}", appmod.datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    # The next save used to 500 here. It must now redirect to a freshly-numbered
+    # bill instead.
+    r2 = _create_bill(client, "DRIFT CO", 2000)
+    assert r2.status_code in (301, 302), (
+        f"collision should be handled, not crash — got {r2.status_code}"
+    )
+    assert re.search(r"/bill/\d+", r2.headers.get("Location", ""))
+
+    # No duplicate bill numbers exist.
+    conn = appmod.get_db()
+    rows = [row[0] for row in conn.execute("SELECT bill_no FROM bills").fetchall()]
+    conn.close()
+    assert len(rows) == len(set(rows)), f"duplicate bill numbers created: {rows}"
+
+
+# ── (F1) Restore must be atomic and WAL-safe (no corruption / silent revert) ───
+#
+# The live DB runs in WAL mode. A naive restore (raw file-copy of the backup over
+# bills.db) leaves the OLD database's -wal/-shm sidecars in place; SQLite then
+# replays those stale frames onto the freshly restored file on the next open,
+# silently corrupting or reverting a "successful" restore. The fixed restore
+# copies the backup THROUGH the SQLite backup API into the live DB, so the
+# restored state is exact, intact, and immediately usable.
+import sqlite3 as _sqlite3  # noqa: E402
+
+
+def test_restore_is_atomic_and_wal_safe(client):
+    _login_ready(client)
+
+    # State A: one bill. Snapshot it into a backup file (clean, backup API).
+    _create_bill(client, "STATE-A CO", 1000)
+    bkname = "bills-2020-01-01.db"
+    bkpath = os.path.join(appmod.BACKUP_DIR, bkname)
+    s1 = _sqlite3.connect(appmod.DB_PATH)
+    s2 = _sqlite3.connect(bkpath)
+    with s2:
+        s1.backup(s2)
+    s1.close()
+    s2.close()
+
+    # State B: add a second bill AND leave uncheckpointed frames in the WAL —
+    # the exact precondition that used to corrupt the restored file.
+    _create_bill(client, "STATE-B CO", 2000)
+    w = _sqlite3.connect(appmod.DB_PATH)
+    w.execute("PRAGMA wal_autocheckpoint=0")
+    w.execute("INSERT INTO settings VALUES ('wal_marker','1')")
+    w.commit()
+    w.close()
+
+    # Restore State A over the live DB via the real admin route.
+    client.get("/restore")
+    token = _csrf(client)
+    resp = client.post("/restore", data={"filename": bkname, "csrf_token": token})
+    assert resp.status_code in (301, 302)
+
+    # Reopen and assert: intact, exactly State A, no State-B leakage, still usable.
+    v = _sqlite3.connect(appmod.DB_PATH)
+    integrity = v.execute("PRAGMA integrity_check").fetchone()[0]
+    names = [r[0] for r in v.execute("SELECT recipient_name FROM bills ORDER BY id").fetchall()]
+    leaked = v.execute("SELECT COUNT(*) FROM settings WHERE key='wal_marker'").fetchone()[0]
+    v.close()
+    assert integrity == "ok", "restored DB failed integrity check (corruption)"
+    assert names == ["STATE-A CO"], f"restore did not produce the exact backup state: {names}"
+    assert leaked == 0, "stale WAL frames from State B leaked into the restored DB"
+
+    # The app keeps working on the restored DB.
+    assert _create_bill(client, "STATE-A CO", 500).status_code in (301, 302)

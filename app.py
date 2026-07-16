@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Timer
-from flask import Flask, render_template, request, redirect, url_for, flash, session, send_from_directory, jsonify
+from flask import Flask, render_template, request, redirect, url_for, flash, session, send_from_directory, jsonify, g, has_request_context
 
 # Load .env (GOOGLE_API_KEY, LICENSE_SERVER_URL, GOOGLE_OAUTH_*, FLASK_SECRET_KEY)
 # — override=True so an empty shell var doesn't shadow the file
@@ -151,7 +151,33 @@ def get_db():
         conn.execute('PRAGMA busy_timeout=8000')
     except sqlite3.Error:
         pass
+    # Safety net against connection leaks: if we're inside a request, register
+    # this connection so it is GUARANTEED to be closed at request teardown —
+    # even when an exception skips the caller's explicit conn.close(). A leaked
+    # SQLite connection keeps its WAL write-lock, which is the root cause of the
+    # intermittent "database is locked" failures that build up over time.
+    # Callers still close their own connections on the happy path (close() is
+    # idempotent, so the teardown sweep is a no-op then). Background threads run
+    # without a request context and keep managing their own connections as before.
+    if has_request_context():
+        conns = g.get('_db_conns')
+        if conns is None:
+            conns = []
+            g._db_conns = conns
+        conns.append(conn)
     return conn
+
+
+@app.teardown_request
+def _close_request_db_conns(exc):
+    """Close any DB connection opened via get_db() during this request that the
+       handler didn't already close (e.g. an exception unwound past its close()).
+       close() is idempotent, so connections closed normally are unaffected."""
+    for conn in g.pop('_db_conns', []) or []:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _bootstrap_from_seed_if_missing():
@@ -768,6 +794,23 @@ def _setup_complete():
 
 def next_bill_no():
     n = int(get_setting('next_bill_number') or 1)
+    return f'JL-{n:04d}', n
+
+
+def _alloc_bill_no(conn):
+    """Collision-proof next bill number for INSERTs. Uses the HIGHER of the
+       stored counter and (max existing JL-#### number + 1). This prevents the
+       UNIQUE-constraint crash that otherwise happens whenever the counter has
+       drifted behind the real data — e.g. after loading demo/sample data,
+       importing/restoring bills, manual DB edits, or a genuinely concurrent
+       save. Returns (bill_no, n). Call inside the same transaction as the
+       INSERT, and retry on IntegrityError to cover the racing case."""
+    counter = int(get_setting('next_bill_number') or 1)
+    row = conn.execute(
+        "SELECT MAX(CAST(SUBSTR(bill_no, 4) AS INTEGER)) FROM bills "
+        "WHERE bill_no LIKE 'JL-%'").fetchone()
+    max_existing = (row[0] or 0) if row else 0
+    n = max(counter, max_existing + 1)
     return f'JL-{n:04d}', n
 
 
@@ -2708,7 +2751,6 @@ def new_bill():
         f = request.form
         conn = get_db()
 
-        bill_no, n = next_bill_no()
         count = max(1, min(20, _safe_int(f.get('delivery_count')) or 1))   # clamped 1..20
         bill_date_val = f.get('bill_date', '')
         delivery_month_val = build_delivery_month(f.get('delivery_month_select', ''), bill_date_val)
@@ -2752,25 +2794,40 @@ def new_bill():
                                 supplier_state, place_of_supply, reverse_charge)
         total = tax['grand_total']
 
-        conn.execute(
-            '''INSERT INTO bills
-               (bill_no, bill_date, recipient_name, recipient_address, recipient_gstin,
-                state_code, trip_type, vehicle_no, freight_type, delivery_month,
-                client_name, total_amount, deliveries, created_at,
-                hsn_sac, taxable_value, reverse_charge, place_of_supply,
-                igst_pct, cgst_pct, sgst_pct,
-                igst_amount, cgst_amount, sgst_amount)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (bill_no,
-             bill_date_val, recipient_name_val, f.get('recipient_address'),
-             f.get('recipient_gstin'), f.get('state_code'), f.get('trip_type'),
-             vehicle_no_val, get_setting('freight_type'), delivery_month_val,
-             f.get('client_name', get_setting('client_name')),
-             total, json.dumps(deliveries), datetime.now().isoformat(),
-             hsn_sac, taxable_value, reverse_charge, place_of_supply,
-             tax['igst_pct'], tax['cgst_pct'], tax['sgst_pct'],
-             tax['igst_amount'], tax['cgst_amount'], tax['sgst_amount'])
-        )
+        # Allocate a collision-proof bill number and insert. If the number is
+        # already taken (a racing save, or demo/imported data whose numbers ran
+        # ahead of the counter), re-allocate from the current max and retry
+        # rather than crashing with a UNIQUE-constraint 500.
+        for _attempt in range(6):
+            bill_no, n = _alloc_bill_no(conn)
+            try:
+                conn.execute(
+                    '''INSERT INTO bills
+                       (bill_no, bill_date, recipient_name, recipient_address, recipient_gstin,
+                        state_code, trip_type, vehicle_no, freight_type, delivery_month,
+                        client_name, total_amount, deliveries, created_at,
+                        hsn_sac, taxable_value, reverse_charge, place_of_supply,
+                        igst_pct, cgst_pct, sgst_pct,
+                        igst_amount, cgst_amount, sgst_amount)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    (bill_no,
+                     bill_date_val, recipient_name_val, f.get('recipient_address'),
+                     f.get('recipient_gstin'), f.get('state_code'), f.get('trip_type'),
+                     vehicle_no_val, get_setting('freight_type'), delivery_month_val,
+                     f.get('client_name', get_setting('client_name')),
+                     total, json.dumps(deliveries), datetime.now().isoformat(),
+                     hsn_sac, taxable_value, reverse_charge, place_of_supply,
+                     tax['igst_pct'], tax['cgst_pct'], tax['sgst_pct'],
+                     tax['igst_amount'], tax['cgst_amount'], tax['sgst_amount'])
+                )
+                break
+            except sqlite3.IntegrityError:
+                if _attempt == 5:
+                    conn.rollback()
+                    conn.close()
+                    flash('Could not assign a unique bill number just now — please try saving again.')
+                    return redirect(url_for('new_bill'))
+                # else: loop re-allocates from the (now higher) max and retries
         bill_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.execute('UPDATE settings SET value=? WHERE key=?', (str(n + 1), 'next_bill_number'))
         remember_recipient(conn, recipient_name_val, f.get('recipient_address'),
@@ -3569,16 +3626,31 @@ _gemini_client = None
 
 def _get_gemini_client():
     global _gemini_client
+
     if _gemini_client is not None:
         return _gemini_client, None
-    api_key = os.environ.get('GOOGLE_API_KEY', '').strip()
-    if not api_key or api_key.startswith('PASTE_'):
-        return None, ("🔑 Google API key not set. Open .env in this folder and paste your "
-                      "key from https://aistudio.google.com/apikey, then restart the app. "
-                      "All non-AI features (manual billing, ledger, POD) still work without it.")
+
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+
+    if not api_key or api_key.startswith("PASTE_"):
+        return None, (
+            "🔑 Google API key not set. Open .env in this folder and paste your "
+            "key from https://aistudio.google.com/apikey, then restart the app."
+        )
+
     try:
         from google import genai
-        _gemini_client = genai.Client(api_key=api_key)
+        from google.genai import types
+        # Without an explicit timeout, a hung/stalled network connection blocks
+        # the extraction thread FOREVER — the retry logic in
+        # _gemini_call_with_retry only ever triggers on an exception, and a
+        # plain hang never raises one. This bounds every Gemini call to 90s so
+        # a stuck request always surfaces as a normal (retryable/friendly)
+        # error instead of leaving the extraction stuck in 'pending' forever.
+        _gemini_client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=90_000),  # milliseconds
+        )
         return _gemini_client, None
     except ImportError:
         return None, ("📦 Gemini SDK not installed. Restart the app — run_mac.command will "
@@ -4057,9 +4129,15 @@ def _friendly_gemini_error(e):
     if 'API_KEY_INVALID' in s or 'invalid api key' in s.lower():
         return "🔑 Gemini API key is invalid. Open .env and paste a fresh key from https://aistudio.google.com/apikey, then restart."
     if 'PERMISSION_DENIED' in s:
-        return "🔒 Gemini API permission denied. Check that your API key has access to gemini-2.5-flash."
-    if 'DEADLINE_EXCEEDED' in s or 'timeout' in s.lower():
-        return "⏱️ Gemini took too long to respond. Try again — usually a transient blip."
+        return ("🔒 Gemini API permission denied. Check that your API key has access to the "
+                f"configured model ({os.environ.get('GEMINI_MODEL', 'gemini-flash-latest')}).")
+    if 'NOT_FOUND' in s and 'model' in s.lower():
+        return ("🚫 The configured Gemini model is no longer available for this API key "
+                "(Google periodically retires model versions). Open .env, set "
+                "GEMINI_MODEL=gemini-flash-latest (or remove the line to use the built-in "
+                "default), then restart the app.")
+    if 'DEADLINE_EXCEEDED' in s or 'timeout' in s.lower() or 'timed out' in s.lower():
+        return "⏱️ Gemini took too long to respond (network stall or slow connection). Try again."
     return f"Gemini API error: {e}"
 
 
@@ -4138,7 +4216,7 @@ def extract_vbl_invoice(file_path):
     try:
         from google.genai import types
         response = _gemini_call_with_retry(lambda: client.models.generate_content(
-            model=os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash'),
+            model=os.environ.get('GEMINI_MODEL', 'gemini-flash-latest'),
             contents=[pil_img, VBL_EXTRACTION_PROMPT],
             config=types.GenerateContentConfig(
                 response_mime_type='application/json',
@@ -4428,7 +4506,7 @@ def extract_challan_image(file_path):
     try:
         from google.genai import types
         response = _gemini_call_with_retry(lambda: client.models.generate_content(
-            model=os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash'),
+            model=os.environ.get('GEMINI_MODEL', 'gemini-flash-latest'),
             contents=[pil_img, CHALLAN_EXTRACTION_PROMPT],
             config=types.GenerateContentConfig(
                 response_mime_type='application/json',
@@ -5298,7 +5376,7 @@ def extract_ledger_image(file_path):
     try:
         from google.genai import types
         response = _gemini_call_with_retry(lambda: client.models.generate_content(
-            model=os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash'),
+            model=os.environ.get('GEMINI_MODEL', 'gemini-flash-latest'),
             contents=[pil_img, LEDGER_EXTRACTION_PROMPT],
             config=types.GenerateContentConfig(
                 response_mime_type='application/json',
@@ -6171,7 +6249,7 @@ def health():
     key = os.environ.get('GOOGLE_API_KEY', '').strip()
     status['checks']['ai'] = {
         'configured': bool(key) and not key.startswith('PASTE_'),
-        'model': os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash'),
+        'model': os.environ.get('GEMINI_MODEL', 'gemini-flash-latest'),
     }
 
     # Latest backup
@@ -6235,7 +6313,6 @@ def restore_do():
     guard = _require_admin()
     if guard:
         return guard
-    import shutil
     chosen = (request.form.get('filename') or '').strip()
     try:
         # Reject anything that isn't a bare filename.
@@ -6250,17 +6327,61 @@ def restore_do():
             flash('That backup could not be found.')
             return redirect(url_for('restore_page'))
 
-        # 1) Safety copy of the current live database.
+        # 1) Consistent safety copy of the CURRENT live database. We use the
+        #    SQLite backup API (WAL-aware) instead of a raw file copy, because
+        #    a raw copy of bills.db alone would MISS any recent committed writes
+        #    still sitting in the -wal sidecar — i.e. the safety copy could be
+        #    silently incomplete right when the user needs it most.
         if os.path.exists(DB_PATH):
             ts = datetime.now().strftime('%Y-%m-%d_%H%M%S')
             safety = os.path.join(BACKUP_DIR, f'bills_before_restore-{ts}.db')
-            shutil.copy2(DB_PATH, safety)
+            src = sqlite3.connect(DB_PATH)
+            try:
+                # Fold outstanding WAL frames into the main file first.
+                try:
+                    src.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                except sqlite3.Error:
+                    pass
+                dst = sqlite3.connect(safety)
+                try:
+                    with dst:
+                        src.backup(dst)
+                finally:
+                    dst.close()
+            finally:
+                src.close()
 
-        # 2) Copy the chosen backup over the live database.
-        shutil.copy2(target_real, DB_PATH)
+        # 2) Restore by copying the backup THROUGH SQLite (backup API) INTO the
+        #    live database, not with a raw file copy. This overwrites every page
+        #    inside the live DB's own transaction/WAL, so:
+        #      • there are no stale -wal frames from the old data to replay
+        #        (the root cause of "successful" restores that silently corrupt
+        #        or revert), and
+        #      • there are no sidecar files to delete — which on Windows can fail
+        #        with a sharing violation whenever any connection is still open.
+        #    It is safe even while the database is in use.
+        srcconn = sqlite3.connect(target_real)
+        dstconn = sqlite3.connect(DB_PATH)
+        try:
+            # Start from a clean WAL, overwrite all pages from the backup, then
+            # fold the restored pages back into the main file.
+            try:
+                dstconn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            except sqlite3.Error:
+                pass
+            with dstconn:
+                srcconn.backup(dstconn)
+            try:
+                dstconn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            except sqlite3.Error:
+                pass
+        finally:
+            srcconn.close()
+            dstconn.close()
 
         flash(f'Restore ho gaya — data ab "{chosen}" wali copy se chal raha hai. '
-              'Purani copy safety ke liye backups folder me rakh li gayi hai.')
+              'Purani copy safety ke liye backups folder me rakh li gayi hai. '
+              'Behtar hoga ki Munshi ko ek baar band karke dobara kholein (restart).')
     except Exception as e:
         app.logger.warning(f'Restore failed: {e}')
         flash(f'Restore nahi ho paya: {e}')
