@@ -39,6 +39,7 @@ os.environ.pop("MUNSHI_REQUIRE_LICENSE", None)
 os.environ.pop("LICENSE_SERVER_URL", None)
 
 import app as appmod  # noqa: E402  (import must follow the env setup above)
+from munshi.services import auth_service as _auth_service  # noqa: E402
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -313,6 +314,36 @@ def test_client_payment_moves_both_sources_same_direction(client):
     assert hub_delta == pytest.approx(4000.0, abs=0.5)
     assert dash_delta == pytest.approx(4000.0, abs=0.5)
     assert dash_delta == pytest.approx(hub_delta, abs=0.5)
+
+
+# ── (4b) Login lockout survives a fresh DB connection (i.e. is NOT in-memory) ───
+#
+# Lockout used to be tracked in a plain in-memory dict, which reset on every
+# app restart. It's now persisted in the `login_failures` table. This test
+# guards that regression: after enough wrong passwords, the account must be
+# locked, AND that lockout must be independently visible via a brand-new
+# sqlite3 connection (proving it lives in the DB, not process memory).
+def test_login_lockout_persists_across_connections(client):
+    for _ in range(_auth_service._LOGIN_MAX_FAILURES):
+        _login(client, "Owner", "wrong-password")
+
+    # The account is now locked — the app's own lockout check agrees.
+    assert appmod._login_lockout_remaining("Owner") > 0
+
+    # A completely separate connection (simulating a fresh process after a
+    # restart) sees the same failure rows — proof this isn't in-memory state.
+    conn = _sqlite3.connect(appmod.DB_PATH)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM login_failures WHERE username = ?", ("Owner",)
+    ).fetchone()[0]
+    conn.close()
+    assert count >= 5
+
+    # Correct password is still rejected while locked out.
+    locked = _login(client, "Owner", "Owner")
+    assert locked.status_code == 200  # re-renders login.html, no session
+    with client.session_transaction() as sess:
+        assert not sess.get("user")
 
 
 # ── (5) Money-math helpers: amount-in-words + GST split ─────────────────────────

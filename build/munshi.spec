@@ -38,6 +38,8 @@ hidden = [
     *collect_submodules('openpyxl'),
     # pymupdf
     'fitz',
+    # waitress (production WSGI server, used for office-LAN sharing)
+    *collect_submodules('waitress'),
 ]
 
 # Data files — anything not a .py that the app reads at runtime

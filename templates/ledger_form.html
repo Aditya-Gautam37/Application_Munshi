@@ -136,12 +136,13 @@
           </div>
           <div class="col-md-2">
             <label class="form-label small">Diesel Vendor</label>
-            <select name="diesel_vendor_id" class="form-select form-select-sm">
-              <option value="">--</option>
-              {% for v in diesel_vendors %}
-              <option value="{{ v.id }}" {{ 'selected' if entry and entry.diesel_vendor_id == v.id }}>{{ v.name }}</option>
-              {% endfor %}
-            </select>
+            <input type="text" name="diesel_vendor_name" class="form-control form-control-sm"
+                   list="dieselVendorsList" autocomplete="off" placeholder="Search or type new..."
+                   value="{{ entry.diesel_vendor_name or '' }}">
+            <datalist id="dieselVendorsList">
+              {% for v in diesel_vendors %}<option value="{{ v.name }}">{% endfor %}
+            </datalist>
+            <small class="text-muted">Start typing — past vendors show up; a new name is saved automatically.</small>
           </div>
           <div class="col-md-2">
             <label class="form-label small fw-bold">Balance owed</label>

@@ -13,83 +13,42 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 
 # Load .env (GOOGLE_API_KEY, LICENSE_SERVER_URL, GOOGLE_OAUTH_*, FLASK_SECRET_KEY)
 # — override=True so an empty shell var doesn't shadow the file
+# In a PyInstaller frozen build, __file__ resolves inside the bundled
+# _internal temp files, not next to the .exe (where the customer's .env
+# actually lives) — mirror resolve_app_dir()'s sys.frozen check here.
 try:
     from dotenv import load_dotenv
-    load_dotenv(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'),
-        override=True,
-    )
+    if getattr(sys, 'frozen', False):
+        _env_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        _env_dir = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(os.path.join(_env_dir, '.env'), override=True)
 except ImportError:
     pass
 
+from munshi.config import resolve_app_dir, resolve_secret_key, Config
+
 app = Flask(__name__)
-# Max upload size: 25 MB (one big photo of a multi-row ledger page is ~3 MB)
-app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
-# Stay signed in for 30 days when "session.permanent = True" is set on login
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['TEMPLATES_AUTO_RELOAD'] = True   # always re-read templates on each request
 app.jinja_env.auto_reload = True
 
-# APP_DIR resolution:
-#   - In source-run mode (`python3 app.py`): the script's directory.
-#   - In PyInstaller bundle mode: the directory of the EXECUTABLE (next to the
-#     customer's bills.db / uploads / backups). NOT sys._MEIPASS, which is a
-#     throwaway temp dir that gets a new random name every launch — using
-#     _MEIPASS would silently wipe the customer's data on every restart.
-def _resolve_app_dir():
-    if getattr(sys, 'frozen', False):
-        # Running inside a PyInstaller bundle. sys.executable points at the
-        # Munshi binary; its directory is where the customer keeps their data.
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-APP_DIR = _resolve_app_dir()
-DB_PATH = os.path.join(APP_DIR, 'bills.db')
-UPLOAD_DIR = os.path.join(APP_DIR, 'uploads')
-BACKUP_DIR = os.path.join(APP_DIR, 'backups')
+# APP_DIR/DB_PATH/UPLOAD_DIR/BACKUP_DIR/ALLOWED_EXTS/MAX_EXTRACTION_FILES stay
+# plain module-level names here (not read off a Config instance at call time)
+# because tests/test_smoke.py reassigns APP_DIR/DB_PATH/BACKUP_DIR/UPLOAD_DIR
+# directly before calling init_db() to point the app at a fresh temp DB per
+# test. See munshi/config.py for what each of these resolves to and why.
+APP_DIR = resolve_app_dir(__file__)
+_cfg = Config(APP_DIR)
+DB_PATH = _cfg.DB_PATH
+UPLOAD_DIR = _cfg.UPLOAD_DIR
+BACKUP_DIR = _cfg.BACKUP_DIR
+ALLOWED_EXTS = _cfg.ALLOWED_EXTS
+MAX_EXTRACTION_FILES = _cfg.MAX_EXTRACTION_FILES
+app.config['MAX_CONTENT_LENGTH'] = _cfg.MAX_CONTENT_LENGTH
+app.config['PERMANENT_SESSION_LIFETIME'] = _cfg.PERMANENT_SESSION_LIFETIME
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-
-def _resolve_secret_key():
-    """Per-install Flask secret_key. Three sources, first hit wins:
-       1) FLASK_SECRET_KEY env var (production deploy, explicit control)
-       2) APP_DIR/.flask_secret file (persisted random key, auto-generated
-          on first run of a fresh install — different per customer)
-       3) Fall back to a generated key + warn (the file write must have failed)
-       This is critical for Munshi: every customer's session cookies must be
-       signed with a UNIQUE secret, otherwise stealing one .exe + bills.db
-       lets an attacker forge logins on every other customer's install."""
-    env_val = os.environ.get('FLASK_SECRET_KEY', '').strip()
-    if env_val:
-        return env_val
-    secret_path = os.path.join(APP_DIR, '.flask_secret')
-    try:
-        if os.path.exists(secret_path):
-            with open(secret_path, 'r') as f:
-                val = f.read().strip()
-                if val and len(val) >= 32:
-                    return val
-        # Generate a fresh per-install secret and persist it (0600 perms)
-        import secrets as _secrets
-        val = _secrets.token_urlsafe(48)
-        with open(secret_path, 'w') as f:
-            f.write(val)
-        try:
-            os.chmod(secret_path, 0o600)
-        except OSError:
-            pass     # best-effort on Windows
-        return val
-    except Exception as e:
-        # Filesystem read-only or other rare error — fall back to in-memory
-        # random key. This means sessions reset on every restart (annoying but
-        # secure).
-        import secrets as _secrets
-        app.logger.warning(f'Could not persist .flask_secret: {e}; using ephemeral key (sessions reset on restart)')
-        return _secrets.token_urlsafe(48)
-
-
-app.secret_key = _resolve_secret_key()
+app.secret_key = resolve_secret_key(APP_DIR, logger=app.logger)
 # Session-cookie hardening (matches the license server). SameSite=Lax blocks
 # cross-site POSTs (a first line of CSRF defence for the POST forms); HttpOnly
 # hides the cookie from JS. Secure is intentionally OFF because Munshi runs over
@@ -102,7 +61,16 @@ app.config.update(
 )
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.pdf', '.webp', '.gif', '.heic'}
+# How many extraction JOBS (each job = one /extract submit, which may contain
+# many files) are allowed to be actively calling Gemini at the same time.
+# Without this, opening several tabs and submitting several batches back to
+# back spawns one thread per submit with no limit, multiplying concurrent PIL
+# image decoding (RAM) and concurrent Gemini requests (quota) with nothing to
+# stop it. Acquired inside the worker thread (not the request handler), so the
+# POST still returns immediately — a queued job just waits its turn before
+# doing any actual work, and the status note reflects that.
+import threading
+_EXTRACTION_SLOTS = threading.Semaphore(2)
 
 
 # ── App-level error handlers (no raw Python tracebacks to user) ────────────────
@@ -140,44 +108,21 @@ def err_unhandled(e):
     ), 500
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
+# Real implementation lives in munshi/database/legacy.py, parameterized on
+# db_path. These wrappers close over THIS module's own DB_PATH global so that
+# tests/test_smoke.py reassigning appmod.DB_PATH before calling init_db()
+# keeps working exactly as before — see that module's docstring.
+from munshi.database import legacy as _db_legacy
+from munshi.database import engine as _db_engine
+
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    # WAL lets the AI-extraction reader and a background writer coexist without
-    # "database is locked"; the busy_timeout absorbs brief write locks.
-    try:
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA busy_timeout=8000')
-    except sqlite3.Error:
-        pass
-    # Safety net against connection leaks: if we're inside a request, register
-    # this connection so it is GUARANTEED to be closed at request teardown —
-    # even when an exception skips the caller's explicit conn.close(). A leaked
-    # SQLite connection keeps its WAL write-lock, which is the root cause of the
-    # intermittent "database is locked" failures that build up over time.
-    # Callers still close their own connections on the happy path (close() is
-    # idempotent, so the teardown sweep is a no-op then). Background threads run
-    # without a request context and keep managing their own connections as before.
-    if has_request_context():
-        conns = g.get('_db_conns')
-        if conns is None:
-            conns = []
-            g._db_conns = conns
-        conns.append(conn)
-    return conn
+    return _db_legacy.get_db(DB_PATH)
 
 
 @app.teardown_request
 def _close_request_db_conns(exc):
-    """Close any DB connection opened via get_db() during this request that the
-       handler didn't already close (e.g. an exception unwound past its close()).
-       close() is idempotent, so connections closed normally are unaffected."""
-    for conn in g.pop('_db_conns', []) or []:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    return _db_legacy.close_request_db_conns(exc)
 
 
 def _bootstrap_from_seed_if_missing():
@@ -219,6 +164,11 @@ def _bootstrap_from_seed_if_missing():
 
 def init_db():
     _bootstrap_from_seed_if_missing()
+    # Rebind the SQLAlchemy engine (used by migrated domains) to whichever
+    # DB_PATH is current right now — this is what lets tests/test_smoke.py's
+    # "reassign DB_PATH, then call init_db()" pattern keep working with no
+    # test-file changes as domains move onto SQLAlchemy sessions.
+    _db_engine.bind(DB_PATH)
     conn = get_db()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS bills (
@@ -630,6 +580,20 @@ def init_db():
     # ── Audit indexes
     conn.execute('CREATE INDEX IF NOT EXISTS idx_audit_entity     ON audit_log(entity, entity_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_audit_when       ON audit_log(occurred_at DESC)')
+
+    # Login brute-force lockout — persisted so a restart (e.g. after a Windows
+    # update, or the customer just closing/reopening the app) doesn't silently
+    # reset an active lockout. Keyed on the submitted username (not a user id)
+    # so lockout also applies to attempts against usernames that don't exist,
+    # same as the previous in-memory version.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS login_failures (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            username   TEXT NOT NULL,
+            failed_at  TEXT NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_login_failures_user ON login_failures(username, failed_at)')
     # ── Hot-query indexes (for performance with thousands of rows)
     conn.execute('CREATE INDEX IF NOT EXISTS idx_bills_date       ON bills(bill_date DESC)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_bills_recipient  ON bills(recipient_name)')
@@ -817,130 +781,9 @@ def _alloc_bill_no(conn):
 # ─────────────────────────────────────────────────────────────────────────────
 # GST helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-# 2-digit state-code → state-name lookup (for the Place-of-Supply line on bills)
-GST_STATE_NAMES = {
-    '01': 'JAMMU & KASHMIR', '02': 'HIMACHAL PRADESH', '03': 'PUNJAB',
-    '04': 'CHANDIGARH', '05': 'UTTARAKHAND', '06': 'HARYANA',
-    '07': 'DELHI', '08': 'RAJASTHAN', '09': 'UTTAR PRADESH',
-    '10': 'BIHAR', '11': 'SIKKIM', '12': 'ARUNACHAL PRADESH',
-    '13': 'NAGALAND', '14': 'MANIPUR', '15': 'MIZORAM',
-    '16': 'TRIPURA', '17': 'MEGHALAYA', '18': 'ASSAM',
-    '19': 'WEST BENGAL', '20': 'JHARKHAND', '21': 'ODISHA',
-    '22': 'CHHATTISGARH', '23': 'MADHYA PRADESH', '24': 'GUJARAT',
-    '25': 'DAMAN & DIU', '26': 'DADRA & NAGAR HAVELI', '27': 'MAHARASHTRA',
-    '28': 'ANDHRA PRADESH (OLD)', '29': 'KARNATAKA', '30': 'GOA',
-    '31': 'LAKSHADWEEP', '32': 'KERALA', '33': 'TAMIL NADU',
-    '34': 'PUDUCHERRY', '35': 'ANDAMAN & NICOBAR', '36': 'TELANGANA',
-    '37': 'ANDHRA PRADESH', '38': 'LADAKH', '97': 'OTHER TERRITORY',
-}
-
-
-def validate_gstin(gstin):
-    """Returns (is_valid, normalized_or_none, error_msg).
-       GSTIN format: 15 chars = 2 (state) + 10 (PAN) + 1 (entity) + 1 ('Z') + 1 (checksum).
-       We validate the structural pattern but skip the checksum digit (rarely typed wrong)."""
-    import re
-    if not gstin:
-        return False, None, 'GSTIN is empty'
-    g = gstin.strip().upper()
-    if len(g) != 15:
-        return False, None, f'GSTIN must be 15 characters (got {len(g)})'
-    if not re.match(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[0-9A-Z]{1}Z[0-9A-Z]{1}$', g):
-        return False, None, 'GSTIN format is invalid (expected: 09AFFFS7446N1Z6 pattern)'
-    return True, g, ''
-
-
-def compute_gst_split(taxable_value, gst_pct, supplier_state, place_of_supply, reverse_charge):
-    """Return a dict with the tax line items.
-       Rule: same state → CGST + SGST (gst_pct split equally);
-             different states → IGST (full gst_pct).
-       Reverse-charge bills carry 0 tax (recipient pays via RCM).
-       All amounts are rounded to whole rupees — freight invoices don't carry paise."""
-    tv = round(float(taxable_value or 0))    # taxable value itself is rounded too
-    out = {'igst_pct': 0, 'cgst_pct': 0, 'sgst_pct': 0,
-           'igst_amount': 0, 'cgst_amount': 0, 'sgst_amount': 0,
-           'total_tax': 0, 'grand_total': tv}
-    if reverse_charge:
-        return out
-    pct = float(gst_pct or 0)
-    if pct <= 0:
-        return out
-    same_state = (supplier_state or '').strip() == (place_of_supply or '').strip()
-    if same_state:
-        half = round(tv * pct / 200)         # CGST = SGST = half of gst_pct, rounded
-        out['cgst_pct'] = pct / 2
-        out['sgst_pct'] = pct / 2
-        out['cgst_amount'] = half
-        out['sgst_amount'] = half
-        out['total_tax'] = half * 2
-    else:
-        amt = round(tv * pct / 100)
-        out['igst_pct'] = pct
-        out['igst_amount'] = amt
-        out['total_tax'] = amt
-    out['grand_total'] = tv + out['total_tax']
-    return out
-
-
-def amount_in_words_inr(amount):
-    """Convert a rupee amount to words in Indian numbering (Lakh / Crore).
-       Returns: 'Rupees One Lakh Forty Seven Thousand Nine Hundred Ninety Seven Only'."""
-    try:
-        amt = float(amount or 0)
-    except (TypeError, ValueError):
-        return 'Rupees Zero Only'
-    if amt < 0:
-        return 'Minus ' + amount_in_words_inr(-amt)
-
-    rupees = int(amt)
-    paise  = round((amt - rupees) * 100)
-
-    ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
-            'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen',
-            'Seventeen', 'Eighteen', 'Nineteen']
-    tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy',
-            'Eighty', 'Ninety']
-
-    def two_digit(n):
-        if n < 20:
-            return ones[n]
-        return (tens[n // 10] + (' ' + ones[n % 10] if n % 10 else '')).strip()
-
-    def three_digit(n):
-        # Returns up to 999 in words
-        parts = []
-        if n >= 100:
-            parts.append(ones[n // 100] + ' Hundred')
-            n %= 100
-        if n:
-            parts.append(two_digit(n))
-        return ' '.join(parts)
-
-    # Indian numbering: ones (0-999), thousand (1K-99K), lakh (1L-99L), crore (1Cr+)
-    parts = []
-    crore = rupees // 10000000
-    rupees %= 10000000
-    lakh  = rupees // 100000
-    rupees %= 100000
-    thousand = rupees // 1000
-    rupees %= 1000
-    hundreds = rupees
-
-    if crore:
-        parts.append((two_digit(crore) if crore > 0 else '') + ' Crore')
-    if lakh:
-        parts.append(two_digit(lakh) + ' Lakh')
-    if thousand:
-        parts.append(two_digit(thousand) + ' Thousand')
-    if hundreds:
-        parts.append(three_digit(hundreds))
-
-    out = 'Rupees ' + (' '.join(parts).strip() or 'Zero')
-    if paise:
-        out += ' and ' + two_digit(paise) + ' Paise'
-    out += ' Only'
-    return out
+# Relocated to munshi/utils/gst.py (pure functions, no Flask/DB dependency).
+from munshi.utils.gst import GST_STATE_NAMES, validate_gstin, compute_gst_split
+from munshi.utils.formatting import amount_in_words_inr
 
 
 def get_supplier_identity():
@@ -1130,60 +973,12 @@ def import_rate_list_from_xlsx(xlsx_path):
     return count, msg
 
 
-def fmt_amount(v):
-    try:
-        f = float(v)
-        return f'{f:,.2f}' if f else ''
-    except Exception:
-        return str(v) if v else ''
-
-
-def fmt_date(v):
-    """Convert YYYY-MM-DD → DD/MM/YY (Indian print format)."""
-    if not v:
-        return ''
-    try:
-        d = datetime.strptime(str(v)[:10], '%Y-%m-%d')
-        return d.strftime('%d/%m/%y')
-    except Exception:
-        return str(v)
-
-
-def _from_json_filter(s):
-    if not s:
-        return None
-    try:
-        return json.loads(s)
-    except Exception:
-        return None
-
-
-def fmt_int(v):
-    """Format a number as a rounded integer with Indian thousands separators.
-       Empty / non-numeric / zero values render as empty string (so blank cells
-       on the printed bill stay blank rather than showing '0')."""
-    if v in (None, '', 0, '0'):
-        return ''
-    try:
-        f = float(v)
-        if abs(f) < 0.5:
-            return ''
-        return f'{round(f):,}'
-    except (TypeError, ValueError):
-        return str(v)
-
-
-def fmt_int0(v):
-    """Same as fmt_int but renders 0 (not blank) — for totals row that must show '0' on empty bills."""
-    try:
-        return f'{round(float(v or 0)):,}'
-    except (TypeError, ValueError):
-        return '0'
-
+# Relocated to munshi/utils/formatting.py (pure functions, no Flask/DB dependency).
+from munshi.utils.formatting import fmt_amount, fmt_date, from_json_filter, fmt_int, fmt_int0
 
 app.jinja_env.filters['fmt']       = fmt_amount
 app.jinja_env.filters['date']      = fmt_date
-app.jinja_env.filters['from_json'] = _from_json_filter
+app.jinja_env.filters['from_json'] = from_json_filter
 app.jinja_env.filters['inr']       = fmt_int      # blank for zero/empty
 app.jinja_env.filters['inr0']      = fmt_int0     # always shows '0' for empty
 
@@ -1192,51 +987,18 @@ app.jinja_env.filters['inr0']      = fmt_int0     # always shows '0' for empty
 # Simple, robust, server-side. The whole app frame stays English unless the
 # session language is 'hi' AND a Hindi translation exists for the exact English
 # source string. Missing keys fall back to English — never a crash, never blank.
-SUPPORTED_LANGS = ('en', 'hi')
-_TRANSLATIONS = {}
+# Relocated to munshi/utils/i18n.py; _load_translations() stays callable with
+# no arguments here since it's a one-line wrapper over the parameterized
+# version (parameterized on app_dir for the same reason as config.py's
+# resolve_app_dir — see that module's docstring).
+from munshi.utils.i18n import SUPPORTED_LANGS, t, load_translations as _load_translations_impl
 
 
 def _load_translations():
-    """Load translations/hi.json (a flat English→Hindi map). Looks alongside
-       the script (dev runs) and inside the PyInstaller _MEIPASS bundle
-       (packaged runs). Any failure just leaves the map empty → all-English."""
-    global _TRANSLATIONS
-    candidates = []
-    bundle_dir = getattr(sys, '_MEIPASS', None)
-    if bundle_dir:
-        candidates.append(os.path.join(bundle_dir, 'translations', 'hi.json'))
-    candidates.append(os.path.join(APP_DIR, 'translations', 'hi.json'))
-    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   'translations', 'hi.json'))
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    _TRANSLATIONS = data
-                    return
-        except Exception as e:
-            app.logger.warning(f'Could not load translations from {path}: {e}')
-    _TRANSLATIONS = {}
+    return _load_translations_impl(APP_DIR)
 
 
 _load_translations()
-
-
-def t(s):
-    """Translate English source string `s` to Hindi when the current session
-       language is 'hi' and a translation exists; otherwise return `s`
-       unchanged. Safe to call outside a request context."""
-    if not s:
-        return s
-    try:
-        if session.get('lang') == 'hi':
-            return _TRANSLATIONS.get(s, s)
-    except Exception:
-        pass
-    return s
-
 
 # Expose t() to every template as a Jinja global: {{ t('Dashboard') }}
 app.jinja_env.globals['t'] = t
@@ -1426,77 +1188,27 @@ def list_clients_with_balance():
 
 
 # ── Auth (session-based, real passwords) ─────────────────────────────────────
-
-import hashlib
+# Relocated to munshi/services/auth_service.py (business logic) and
+# munshi/repositories/user_repository.py (data access). Thin re-exports below
+# keep every one of the many not-yet-migrated call sites elsewhere in this
+# file (license, drive backup, reports, ledger, payments, restore — see the
+# earlier architecture audit) working unchanged: _hash_password,
+# _verify_password, current_user, current_user_role, and _require_admin are
+# all called from outside the Auth domain.
 import secrets
-from functools import wraps
+from munshi.services import auth_service
 
 # Endpoints that don't require auth. 'setup'/'setup_demo' are the first-run
 # wizard, reached before any user exists.
 _PUBLIC_ENDPOINTS = {'login', 'static', 'health', 'setup', 'setup_demo', 'set_lang'}
 
-
-def _hash_password(password):
-    """PBKDF2-HMAC-SHA256 with 16-byte salt and 200k iterations (OWASP 2023)."""
-    salt = secrets.token_bytes(16)
-    h = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200_000)
-    return base64.b64encode(salt + h).decode()
-
-
-def _verify_password(password, stored):
-    try:
-        raw = base64.b64decode(stored.encode())
-    except Exception:
-        return False
-    if len(raw) < 32:
-        return False
-    salt, h = raw[:16], raw[16:]
-    new_h = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 200_000)
-    return secrets.compare_digest(h, new_h)
-
-
-# ── Login brute-force throttling (in-memory; resets on app restart) ───────────
-# After _LOGIN_MAX_FAILURES wrong passwords within the window, the account is
-# locked for the lockout period. In-memory is fine for Munshi's threat model
-# (a single laptop, not exposed to the internet); every failed attempt is also
-# written to the audit log, which DOES persist across restarts.
-_LOGIN_MAX_FAILURES = 5
-_LOGIN_WINDOW_SECONDS = 15 * 60       # count failures within this rolling window
-_LOGIN_LOCKOUT_SECONDS = 15 * 60      # lock the account this long once threshold is hit
-_login_failures = {}  # username -> list of datetime failure timestamps
-
-
-def _login_lockout_remaining(username):
-    """Seconds left in the lockout for this username, or 0 if not locked."""
-    fails = _login_failures.get(username)
-    if not fails:
-        return 0
-    now = datetime.now()
-    recent = [t for t in fails if (now - t).total_seconds() < _LOGIN_WINDOW_SECONDS]
-    _login_failures[username] = recent
-    if len(recent) >= _LOGIN_MAX_FAILURES:
-        # The lockout clock starts at the most recent failure.
-        locked_until = recent[-1] + timedelta(seconds=_LOGIN_LOCKOUT_SECONDS)
-        return max(0, int((locked_until - now).total_seconds()))
-    return 0
-
-
-def _record_login_failure(username):
-    if not username:
-        return
-    _login_failures.setdefault(username, []).append(datetime.now())
-
-
-def _clear_login_failures(username):
-    _login_failures.pop(username, None)
-
-
-def current_user():
-    return session.get('user') or ''
-
-
-def current_user_role():
-    return session.get('role') or ''
+_hash_password = auth_service.hash_password
+_verify_password = auth_service.verify_password
+_login_lockout_remaining = auth_service.login_lockout_remaining
+_record_login_failure = auth_service.record_login_failure
+_clear_login_failures = auth_service.clear_login_failures
+current_user = auth_service.current_user
+current_user_role = auth_service.current_user_role
 
 
 @app.context_processor
@@ -1569,223 +1281,13 @@ def _require_login():
         return redirect(url_for('change_password'))
 
 
-@app.route('/setup', methods=['GET', 'POST'])
-def setup():
-    """First-run wizard: the buyer names their firm and creates the owner login.
-       If setup is already complete, there's nothing to do here — go home."""
-    if _setup_complete():
-        return redirect(url_for('dashboard'))
-
-    if request.method == 'POST':
-        # Company / firm identity
-        company    = (request.form.get('company_name') or '').strip()
-        gstin      = (request.form.get('gstin') or '').strip().upper()
-        pan        = (request.form.get('pan') or '').strip().upper()
-        address    = (request.form.get('address') or '').strip()
-        state_code = (request.form.get('state_code') or '').strip()
-        phone      = (request.form.get('phone') or '').strip()
-        # Owner login
-        username   = (request.form.get('username') or '').strip()
-        password   = request.form.get('password') or ''
-        confirm    = request.form.get('confirm_password') or ''
-
-        # ── Validate (friendly, minimal) ──
-        error = None
-        if not company:
-            error = 'Please enter your company / firm name.'
-        elif not username:
-            error = 'Please choose a username for your owner login.'
-        elif len(password) < 4:
-            error = 'Password must be at least 4 characters.'
-        elif password != confirm:
-            error = 'The two passwords do not match.'
-
-        # Soft note on GSTIN length (don't hard-block — some firms aren't GST-registered)
-        gstin_note = None
-        if gstin and len(gstin) != 15:
-            gstin_note = 'Heads up: a GSTIN is normally 15 characters. Saved as entered.'
-
-        if error:
-            return render_template('setup.html', error=error, form=request.form)
-
-        # ── Save firm identity ──
-        set_setting('supplier_name',       company)
-        set_setting('supplier_gstin',      gstin)
-        set_setting('supplier_pan',        pan)
-        set_setting('supplier_address',    address)
-        set_setting('supplier_state_code', state_code)
-        set_setting('supplier_phone',      phone)
-
-        # ── Create the owner account (admin, ready to use immediately) ──
-        conn = get_db()
-        existing = conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone()
-        if existing:
-            conn.close()
-            return render_template('setup.html',
-                                   error='That username already exists. Pick another.',
-                                   form=request.form)
-        conn.execute(
-            '''INSERT INTO users (username, password_hash, full_name, role,
-                                  is_active, must_change_password, created_at)
-               VALUES (?,?,?,?,1,0,?)''',
-            (username, _hash_password(password), username, 'admin',
-             datetime.now().isoformat()))
-        try:
-            log_audit(conn, 'setup', 'user', None,
-                      summary=f'Initial setup completed by {username}', user=username)
-        except Exception:
-            pass
-        conn.commit()
-        conn.close()
-
-        # ── Mark setup done + sign the owner in ──
-        set_setting('setup_complete', '1')
-        session.clear()
-        session['user'] = username
-        session['role'] = 'admin'
-        session['must_change_password'] = False
-        session.permanent = True
-        if gstin_note:
-            flash(gstin_note)
-        flash(f'Welcome to Munshi, {company}! Your account is ready.')
-        return redirect(url_for('dashboard'))
-
-    return render_template('setup.html', error=None, form={})
-
-
-@app.route('/setup/demo', methods=['POST'])
-def setup_demo():
-    """Load the sample demo dataset for a sales pitch, then hand off to login
-       (demo user is 'Demo' / 'Demo'). Copies rows out of data/seed_demo.db into
-       the live DB. Wrapped so a failure lands the user back on /setup safely."""
-    if _setup_complete():
-        return redirect(url_for('login'))
-
-    demo_path = os.path.join(APP_DIR, 'data', 'seed_demo.db')
-    try:
-        bundle_dir = getattr(sys, '_MEIPASS', None)
-    except Exception:
-        bundle_dir = None
-    if bundle_dir:
-        bundled = os.path.join(bundle_dir, 'data', 'seed_demo.db')
-        if os.path.exists(bundled):
-            demo_path = bundled
-
-    if not os.path.exists(demo_path):
-        flash('Sample demo data is not available in this copy.')
-        return redirect(url_for('setup'))
-
-    # Tables to copy from the demo DB into the live DB. settings + users are
-    # REPLACE-merged (demo identity wins); operational tables are appended.
-    tables = ['settings', 'users', 'freight_rates', 'transporters',
-              'diesel_vendors', 'recipients', 'vehicles', 'drivers',
-              'bills', 'challans', 'ledger_entries', 'payments']
-    try:
-        src = sqlite3.connect(demo_path)
-        src.row_factory = sqlite3.Row
-        dst = get_db()
-        for t in tables:
-            # Only copy tables that exist in BOTH DBs.
-            src_has = src.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
-            ).fetchone()
-            dst_has = dst.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
-            ).fetchone()
-            if not (src_has and dst_has):
-                continue
-            src_cols = [r['name'] for r in src.execute(f'PRAGMA table_info({t})').fetchall()]
-            dst_cols = {r['name'] for r in dst.execute(f'PRAGMA table_info({t})').fetchall()}
-            cols = [c for c in src_cols if c in dst_cols]
-            if not cols:
-                continue
-            col_list = ','.join(f'"{c}"' for c in cols)
-            placeholders = ','.join('?' for _ in cols)
-            verb = 'INSERT OR REPLACE' if t in ('settings', 'users') else 'INSERT OR IGNORE'
-            for row in src.execute(f'SELECT {col_list} FROM "{t}"').fetchall():
-                dst.execute(
-                    f'{verb} INTO "{t}" ({col_list}) VALUES ({placeholders})',
-                    tuple(row[c] for c in cols))
-        dst.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('setup_complete', '1'))
-        dst.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('is_demo', '1'))
-        dst.commit()
-        dst.close()
-        src.close()
-    except Exception as e:
-        app.logger.warning(f'setup_demo failed: {e}')
-        flash('Sorry, loading the sample demo data failed. Please try again or set up your own firm.')
-        return redirect(url_for('setup'))
-
-    flash('Sample demo data loaded. Sign in with username "Demo" and password "Demo".')
-    return redirect(url_for('login'))
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    raw_next = request.args.get('next') or request.form.get('next') or ''
-    # Only allow relative in-site redirects (block open-redirect phishing):
-    # a next URL must start with a single '/', not '//' (protocol-relative)
-    # and not an absolute URL like https://evil.com.
-    next_url = raw_next if (raw_next.startswith('/') and not raw_next.startswith('//')) else url_for('dashboard')
-    if request.method == 'POST':
-        username = (request.form.get('username') or '').strip()
-        password = request.form.get('password') or ''
-        # Brute-force throttle: if this account has had too many recent wrong
-        # attempts, refuse (and don't even check the password) until it cools down.
-        wait = _login_lockout_remaining(username)
-        if wait > 0:
-            mins = max(1, wait // 60)
-            flash(f'Too many wrong attempts. Please wait about {mins} minute(s) before trying again.')
-            return render_template('login.html', next_url=next_url)
-        conn = get_db()
-        row = conn.execute(
-            'SELECT * FROM users WHERE username=? AND is_active=1', (username,)).fetchone()
-        if row and _verify_password(password, row['password_hash']):
-            _lang = session.get('lang')          # preserve chosen language across the reset
-            session.clear()
-            if _lang:
-                session['lang'] = _lang
-            session['user'] = row['username']
-            session['role'] = row['role'] or 'operator'
-            session['must_change_password'] = bool(row['must_change_password'])
-            session.permanent = True  # respect PERMANENT_SESSION_LIFETIME
-            conn.execute('UPDATE users SET last_login=? WHERE username=?',
-                         (datetime.now().isoformat(), row['username']))
-            log_audit(conn, 'login', 'user', None,
-                      summary=f'User {row["username"]} signed in', user=row['username'])
-            conn.commit()
-            conn.close()
-            _clear_login_failures(username)
-            return redirect(next_url)
-        # Failed sign-in: record the attempt for throttling, audit it, then commit.
-        _record_login_failure(username)
-        log_audit(conn, 'login_failed', 'user', None,
-                  summary=f'Failed sign-in for "{username or "unknown"}"',
-                  user=(username or 'unknown'))
-        conn.commit()
-        conn.close()
-        flash(t('Invalid username or password.'))
-    return render_template('login.html', next_url=next_url)
-
-
-@app.route('/logout', methods=['GET', 'POST'])
-def logout():
-    user = current_user()
-    if user:
-        try:
-            conn = get_db()
-            log_audit(conn, 'logout', 'user', None,
-                      summary=f'User {user} signed out', user=user)
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
-    _lang = session.get('lang')                  # keep the language choice after sign-out
-    session.clear()
-    if _lang:
-        session['lang'] = _lang
-    flash(t('Signed out.'))
-    return redirect(url_for('login'))
+# /setup, /setup/demo, /login, /logout, /change-password relocated to
+# munshi/api/auth.py (view functions) + munshi/services/auth_service.py
+# (business logic) + munshi/repositories/user_repository.py (data access).
+# Registered here with their ORIGINAL endpoint names — see api/auth.py's
+# module docstring for why this isn't a Blueprint.
+from munshi.api.auth import register as _register_auth_routes
+_register_auth_routes(app)
 
 
 @app.route('/lang/<code>')
@@ -1799,41 +1301,6 @@ def set_lang(code):
     if ref and ref.startswith(request.host_url):
         return redirect(ref)
     return redirect(url_for('dashboard'))
-
-
-@app.route('/change-password', methods=['GET', 'POST'])
-def change_password():
-    if not session.get('user'):
-        return redirect(url_for('login'))
-    if request.method == 'POST':
-        old = request.form.get('old_password') or ''
-        new = request.form.get('new_password') or ''
-        confirm = request.form.get('confirm_password') or ''
-        if len(new) < 6:
-            flash(t('New password must be at least 6 characters.'))
-            return redirect(url_for('change_password'))
-        if new.lower() == (session.get('user') or '').lower():
-            flash('Your password cannot be the same as your username. Pick something different.')
-            return redirect(url_for('change_password'))
-        if new != confirm:
-            flash(t('New passwords do not match.'))
-            return redirect(url_for('change_password'))
-        conn = get_db()
-        row = conn.execute('SELECT password_hash FROM users WHERE username=?',
-                           (session['user'],)).fetchone()
-        if not row or not _verify_password(old, row['password_hash']):
-            conn.close()
-            flash(t('Current password is wrong.'))
-            return redirect(url_for('change_password'))
-        conn.execute('UPDATE users SET password_hash=?, must_change_password=0 WHERE username=?',
-                     (_hash_password(new), session['user']))
-        conn.commit()
-        conn.close()
-        session['must_change_password'] = False
-        flash(t('Password updated.'))
-        return redirect(url_for('dashboard'))
-    return render_template('change_password.html',
-                           must_change=session.get('must_change_password'))
 
 
 # ── License enforcement (Munshi commercial — phone-home + kill-switch) ──────
@@ -2558,133 +2025,10 @@ def drive_sync_now():
 
 
 # ── Admin user management ────────────────────────────────────────────────────
-
-def _require_admin():
-    """Return None if current user is admin, else a redirect/403 response."""
-    if current_user_role() != 'admin':
-        flash('You need admin access for that action.')
-        return redirect(url_for('dashboard'))
-    return None
-
-
-@app.route('/users')
-def users_index():
-    guard = _require_admin()
-    if guard: return guard
-    conn = get_db()
-    rows = conn.execute(
-        '''SELECT username, full_name, role, is_active, must_change_password,
-                  created_at, last_login
-           FROM users ORDER BY role DESC, username''').fetchall()
-    conn.close()
-    return render_template('users.html', users=[dict(r) for r in rows])
-
-
-@app.route('/users/add', methods=['POST'])
-def users_add():
-    guard = _require_admin()
-    if guard: return guard
-    f = request.form
-    username = (f.get('username') or '').strip()
-    full_name = (f.get('full_name') or '').strip() or username
-    role = f.get('role') or 'operator'
-    if role not in ('admin', 'operator'):
-        role = 'operator'
-    if not username:
-        flash('Username is required.')
-        return redirect(url_for('users_index'))
-    if len(username) < 2:
-        flash('Username must be at least 2 characters.')
-        return redirect(url_for('users_index'))
-    conn = get_db()
-    existing = conn.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone()
-    if existing:
-        conn.close()
-        flash(f'User "{username}" already exists.')
-        return redirect(url_for('users_index'))
-    # First-login password = username
-    conn.execute(
-        '''INSERT INTO users (username, password_hash, full_name, role,
-                              is_active, must_change_password, created_at)
-           VALUES (?,?,?,?,1,1,?)''',
-        (username, _hash_password(username), full_name, role, datetime.now().isoformat()))
-    log_audit(conn, 'create', 'user', 0,
-              summary=f'Created user "{username}" ({role})')
-    conn.commit()
-    conn.close()
-    flash(f'User "{username}" created. First-login password is "{username}" — they must change it.')
-    return redirect(url_for('users_index'))
-
-
-@app.route('/users/<username>/reset-password', methods=['POST'])
-def users_reset_password(username):
-    guard = _require_admin()
-    if guard: return guard
-    conn = get_db()
-    row = conn.execute('SELECT username FROM users WHERE username=?', (username,)).fetchone()
-    if not row:
-        conn.close()
-        flash('User not found.')
-        return redirect(url_for('users_index'))
-    # Reset to username — they'll be forced to change on next login
-    conn.execute(
-        'UPDATE users SET password_hash=?, must_change_password=1 WHERE username=?',
-        (_hash_password(username), username))
-    log_audit(conn, 'reset_password', 'user', 0,
-              summary=f'Reset password for "{username}"')
-    conn.commit()
-    conn.close()
-    flash(f'Password for "{username}" reset to their username. They will be forced to change it on next login.')
-    return redirect(url_for('users_index'))
-
-
-@app.route('/users/<username>/deactivate', methods=['POST'])
-def users_deactivate(username):
-    guard = _require_admin()
-    if guard: return guard
-    if username == current_user():
-        flash('You cannot deactivate yourself.')
-        return redirect(url_for('users_index'))
-    conn = get_db()
-    conn.execute('UPDATE users SET is_active=0 WHERE username=?', (username,))
-    log_audit(conn, 'deactivate', 'user', 0, summary=f'Deactivated user "{username}"')
-    conn.commit()
-    conn.close()
-    flash(f'User "{username}" deactivated. They can no longer sign in.')
-    return redirect(url_for('users_index'))
-
-
-@app.route('/users/<username>/activate', methods=['POST'])
-def users_activate(username):
-    guard = _require_admin()
-    if guard: return guard
-    conn = get_db()
-    conn.execute('UPDATE users SET is_active=1 WHERE username=?', (username,))
-    log_audit(conn, 'activate', 'user', 0, summary=f'Re-activated user "{username}"')
-    conn.commit()
-    conn.close()
-    flash(f'User "{username}" re-activated.')
-    return redirect(url_for('users_index'))
-
-
-@app.route('/users/<username>/role', methods=['POST'])
-def users_change_role(username):
-    guard = _require_admin()
-    if guard: return guard
-    new_role = request.form.get('role') or 'operator'
-    if new_role not in ('admin', 'operator'):
-        new_role = 'operator'
-    if username == current_user() and new_role != 'admin':
-        flash('You cannot demote yourself — promote another admin first.')
-        return redirect(url_for('users_index'))
-    conn = get_db()
-    conn.execute('UPDATE users SET role=? WHERE username=?', (new_role, username))
-    log_audit(conn, 'change_role', 'user', 0,
-              summary=f'Changed "{username}" role → {new_role}')
-    conn.commit()
-    conn.close()
-    flash(f'"{username}" is now {new_role}.')
-    return redirect(url_for('users_index'))
+# /users* routes relocated to munshi/api/auth.py (registered above via
+# _register_auth_routes). _require_admin is re-exported here since other
+# not-yet-migrated routes call it directly (e.g. /restore, further down).
+_require_admin = auth_service.require_admin
 
 
 def _diff_dict(before, after, fields=None):
@@ -4259,40 +3603,52 @@ def _run_extraction_async(ext_id, saved_files):
         finally:
             c.close()
 
+    # Bound how many extraction jobs actively call Gemini (and hold decoded
+    # images in memory) at once — see _EXTRACTION_SLOTS. If every slot is
+    # busy (e.g. someone else's batch is mid-flight, or several tabs/batches
+    # were submitted back to back), wait our turn instead of piling on more
+    # concurrent Gemini requests and PIL image decoding, and let the polling
+    # UI reflect that instead of showing the stale "uploading" note.
+    if not _EXTRACTION_SLOTS.acquire(blocking=False):
+        write('Queued — waiting for another extraction to finish…')
+        _EXTRACTION_SLOTS.acquire()
     try:
-        for seq, (rel_name, full_path) in enumerate(saved_files, start=1):
-            write(f'Reading file {seq} of {total}…')
-            if seq > 1 and throttle_seconds:
-                time.sleep(throttle_seconds)
-            result = extract_vbl_invoice(full_path)
+        try:
+            for seq, (rel_name, full_path) in enumerate(saved_files, start=1):
+                write(f'Reading file {seq} of {total}…')
+                if seq > 1 and throttle_seconds:
+                    time.sleep(throttle_seconds)
+                result = extract_vbl_invoice(full_path)
+                c = get_db()
+                try:
+                    c.execute(
+                        '''INSERT INTO extracted_invoices
+                           (extraction_id, file_name, seq, raw_json, error)
+                           VALUES (?,?,?,?,?)''',
+                        (ext_id, rel_name, seq,
+                         json.dumps(result['data']) if result['ok'] else result['raw'],
+                         result.get('error'))
+                    )
+                    c.commit()
+                finally:
+                    c.close()
+            write('Done')
             c = get_db()
             try:
-                c.execute(
-                    '''INSERT INTO extracted_invoices
-                       (extraction_id, file_name, seq, raw_json, error)
-                       VALUES (?,?,?,?,?)''',
-                    (ext_id, rel_name, seq,
-                     json.dumps(result['data']) if result['ok'] else result['raw'],
-                     result.get('error'))
-                )
+                c.execute('UPDATE extractions SET status=? WHERE id=?', ('extracted', ext_id))
                 c.commit()
             finally:
                 c.close()
-        write('Done')
-        c = get_db()
-        try:
-            c.execute('UPDATE extractions SET status=? WHERE id=?', ('extracted', ext_id))
-            c.commit()
-        finally:
-            c.close()
-    except Exception as e:
-        c = get_db()
-        try:
-            c.execute('UPDATE extractions SET status=?, note=? WHERE id=?',
-                      ('failed', f'Error: {e}'[:500], ext_id))
-            c.commit()
-        finally:
-            c.close()
+        except Exception as e:
+            c = get_db()
+            try:
+                c.execute('UPDATE extractions SET status=?, note=? WHERE id=?',
+                          ('failed', f'Error: {e}'[:500], ext_id))
+                c.commit()
+            finally:
+                c.close()
+    finally:
+        _EXTRACTION_SLOTS.release()
 
 
 @app.route('/extract', methods=['GET', 'POST'])
@@ -4302,6 +3658,10 @@ def extract_upload():
         files = [f for f in files if f and f.filename]
         if not files:
             flash('Please choose at least one file.')
+            return redirect(url_for('extract_upload'))
+        if len(files) > MAX_EXTRACTION_FILES:
+            flash(f'Please upload at most {MAX_EXTRACTION_FILES} files at a time '
+                  f'(you selected {len(files)}). Split them into smaller batches.')
             return redirect(url_for('extract_upload'))
 
         # Validate
@@ -4808,6 +4168,25 @@ def get_diesel_vendors():
     return [dict(r) for r in rows]
 
 
+def remember_diesel_vendor(conn, name):
+    """Get-or-create a diesel vendor by name (case-insensitive match) so past
+       vendors typed on a ledger entry are auto-saved for next time. Returns
+       the vendor id, or None if name is blank."""
+    name = (name or '').strip()
+    if not name:
+        return None
+    row = conn.execute(
+        'SELECT id FROM diesel_vendors WHERE name = ? COLLATE NOCASE', (name,)
+    ).fetchone()
+    if row:
+        return row['id']
+    conn.execute(
+        'INSERT INTO diesel_vendors (name, created_at) VALUES (?,?)',
+        (name, datetime.now().isoformat())
+    )
+    return conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+
+
 # ── /masters — combined Transporters + Diesel Vendors page ─────────────────
 @app.route('/masters')
 def masters_index():
@@ -4972,6 +4351,7 @@ def ledger_new():
 def _ledger_save_new():
     f = request.form
     conn = get_db()
+    diesel_vendor_id = remember_diesel_vendor(conn, f.get('diesel_vendor_name'))
     conn.execute('''
         INSERT INTO ledger_entries (
           challan_id, entry_date, gr_no, vehicle_no, station, shipment_no, trip_type,
@@ -4985,7 +4365,7 @@ def _ledger_save_new():
         _safe_num(f.get('mt_qty')), _safe_num(f.get('freight')),
         _safe_num(f.get('advance_cash')) or 0, _safe_num(f.get('advance_account')) or 0,
         _safe_num(f.get('diesel')) or 0,
-        f.get('diesel_vendor_id') or None, f.get('transporter_id') or None,
+        diesel_vendor_id, f.get('transporter_id') or None,
         f.get('remarks'), datetime.now().isoformat()
     ))
     new_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
@@ -5003,6 +4383,7 @@ def ledger_view(le_id):
         f = request.form
         before_row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
         before = dict(before_row) if before_row else {}
+        diesel_vendor_id = remember_diesel_vendor(conn, f.get('diesel_vendor_name'))
         conn.execute('''
             UPDATE ledger_entries SET
               entry_date=?, gr_no=?, vehicle_no=?, station=?, shipment_no=?, trip_type=?,
@@ -5015,7 +4396,7 @@ def ledger_view(le_id):
             _safe_num(f.get('mt_qty')), _safe_num(f.get('freight')),
             _safe_num(f.get('advance_cash')) or 0, _safe_num(f.get('advance_account')) or 0,
             _safe_num(f.get('diesel')) or 0,
-            f.get('diesel_vendor_id') or None, f.get('transporter_id') or None,
+            diesel_vendor_id, f.get('transporter_id') or None,
             f.get('remarks'), datetime.now().isoformat(), le_id
         ))
         remember_vehicle(conn, (f.get('vehicle_no') or '').strip().upper())
@@ -5041,7 +4422,12 @@ def ledger_view(le_id):
         flash('Ledger entry updated.')
         return redirect(url_for('ledger_view', le_id=le_id))
 
-    row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
+    row = conn.execute(
+        '''SELECT le.*, dv.name AS diesel_vendor_name
+           FROM ledger_entries le
+           LEFT JOIN diesel_vendors dv ON dv.id = le.diesel_vendor_id
+           WHERE le.id=?''', (le_id,)
+    ).fetchone()
     conn.close()
     if not row:
         return 'Ledger entry not found', 404
@@ -5419,11 +4805,26 @@ def ledger_extract_upload():
             return redirect(url_for('ledger_extract_upload'))
 
         data = result['data']
+        if result.get('error'):
+            # ok=True but _try_parse_gemini_json had to repair the response
+            # (e.g. Gemini's output was cut off by the token limit). The rows
+            # we DID recover are fine, but tell the user something upstream
+            # was incomplete rather than silently proceeding.
+            flash(f'Note: {result["error"]} — please double-check the rows below carefully.')
         conn = get_db()
         conn.execute(
             '''INSERT INTO ledger_extractions (source_image, page_date, raw_json, status, created_at)
                VALUES (?,?,?,?,?)''',
-            (rel_name, data.get('page_date'), result['raw'], 'pending', datetime.now().isoformat())
+            # Store the PARSED (and possibly repaired) data, not the raw Gemini
+            # text. When the raw response is truncated/malformed, _try_parse_
+            # gemini_json() above already repairs it into a valid `data` dict —
+            # but storing result['raw'] here would save the still-broken
+            # original text. The review page re-parses this column with a
+            # plain json.loads() (no repair logic) and silently treats any
+            # failure as zero rows, so a truncated-but-repairable response
+            # would show "0 rows extracted — try a clearer photo", discarding
+            # rows that were actually recovered successfully.
+            (rel_name, data.get('page_date'), json.dumps(data), 'pending', datetime.now().isoformat())
         )
         ext_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.commit()
@@ -5485,7 +4886,11 @@ def ledger_extract_review(le_id):
     extraction = dict(row)
     try:
         parsed = json.loads(extraction['raw_json'])
-    except Exception:
+    except Exception as e:
+        # raw_json is written as already-valid JSON by ledger_extract_upload,
+        # so this should not normally happen — but if it ever does, log it
+        # instead of silently showing "0 rows extracted" with no trace of why.
+        app.logger.warning(f'ledger_extract_review #{le_id}: could not parse stored raw_json: {e}')
         parsed = {}
     extraction['parsed'] = parsed
     conn.close()
@@ -5749,11 +5154,25 @@ def report_diesel():
 
     grand_total = sum(r['total_diesel'] for r in by_vendor)
     grand_trips = sum(r['trips'] for r in by_vendor)
+
+    # All-time vendor directory (not limited to the date range above) so past
+    # vendors stay easy to find/search even outside the current window.
+    all_vendors = conn.execute("""
+      SELECT dv.id, dv.name, dv.location,
+             COUNT(le.id) AS trips,
+             COALESCE(SUM(le.diesel), 0) AS total_diesel,
+             MAX(le.entry_date) AS last_used
+      FROM diesel_vendors dv
+      LEFT JOIN ledger_entries le ON le.diesel_vendor_id = dv.id AND le.diesel > 0
+      GROUP BY dv.id
+      ORDER BY dv.name
+    """).fetchall()
     conn.close()
 
     return render_template('report_diesel.html',
                            by_vendor=[dict(r) for r in by_vendor],
                            by_vehicle=[dict(r) for r in by_vehicle],
+                           all_vendors=[dict(r) for r in all_vendors],
                            grand_total=grand_total, grand_trips=grand_trips,
                            date_from=df, date_to=dt)
 
@@ -6411,10 +5830,17 @@ if __name__ == '__main__':
 
     backup_db_if_needed()
     port = int(os.environ.get('PORT', 5056))
+    # HOST controls who can reach Munshi. Default stays 127.0.0.1 (this PC
+    # only) — the app's whole promise is that data never leaves the laptop.
+    # Set HOST=0.0.0.0 in .env to share Munshi over the office LAN (other
+    # computers on the same office network can then open it in their browser).
+    host = os.environ.get('HOST', '127.0.0.1').strip() or '127.0.0.1'
 
     # Pre-flight: is the port already taken? (Almost always means Munshi is
-    # already running.) We check before app.run so we can show plain-English
-    # guidance instead of Werkzeug's technical "Address already in use" trace.
+    # already running.) We check before serving so we can show plain-English
+    # guidance instead of a technical "Address already in use" trace. Always
+    # probe 127.0.0.1 regardless of HOST — binding 0.0.0.0 covers the loopback
+    # address too, so this still correctly detects an already-running Munshi.
     import socket
     _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -6435,4 +5861,38 @@ if __name__ == '__main__':
         webbrowser.open(f'http://127.0.0.1:{port}')
     if not os.environ.get('PORT'):  # don't auto-open in preview/dev mode
         Timer(1.2, open_browser).start()
-    app.run(host='127.0.0.1', port=port, debug=False)
+
+    if host != '127.0.0.1':
+        # LAN mode: print every address a coworker's browser can reach. We
+        # don't touch the Windows Firewall ourselves — that's a system setting
+        # the operator has to approve — so just remind them it may be needed.
+        def _lan_ip():
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(('8.8.8.8', 80))  # routing lookup only, no packet sent
+                return s.getsockname()[0]
+            except OSError:
+                return None
+            finally:
+                s.close()
+        print('\n' + '=' * 64)
+        print(f' Munshi is sharing over the network (HOST={host}).')
+        _ip = _lan_ip()
+        if _ip:
+            print(f' Coworkers on this office network can open:   http://{_ip}:{port}')
+        print(' If that does not load on another computer, allow Munshi through')
+        print(' Windows Firewall (Windows Security > Firewall > Allow an app).')
+        print('=' * 64 + '\n')
+
+    try:
+        from waitress import serve
+        # threads=8 lets several office computers use Munshi at once instead
+        # of queuing behind Flask's dev server, which handles one request at
+        # a time by default.
+        serve(app, host=host, port=port, threads=8)
+    except ImportError:
+        app.logger.warning(
+            "waitress is not installed - falling back to Flask's development "
+            "server (fine for one PC; run 'pip install waitress' for reliable "
+            "multi-user LAN use).")
+        app.run(host=host, port=port, debug=False, threaded=True)

@@ -28,3 +28,16 @@ Pillow>=12.3.0,<13
 
 # XLSX export — SemVer, stable 3.x.
 openpyxl>=3.1.5,<4
+
+# Production WSGI server (used when HOST is set for office-LAN sharing) —
+# pure Python, no compiler needed on Windows, unlike gunicorn. SemVer, stable.
+waitress>=3.0.0,<4
+
+# ORM layer for the layered-architecture refactor (repositories/models) — SQLAlchemy
+# 2.0's new-style API, SemVer, stable 2.x line.
+SQLAlchemy>=2.0.51,<3
+
+# Request/response validation for the schemas layer. Was already present
+# transitively (via google-genai's dependency on it); now a direct dependency
+# since the app imports it itself. SemVer, stable 2.x line.
+pydantic>=2.13.4,<3

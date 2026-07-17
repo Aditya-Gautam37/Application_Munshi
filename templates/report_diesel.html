@@ -87,5 +87,61 @@
       </div>
     </div>
   </div>
+
+  <div class="card mt-3">
+    <div class="card-header bg-dark text-white fw-semibold d-flex justify-content-between align-items-center">
+      <span>All Vendors <small class="fw-normal">(past vendors, all-time — new ones from ledger entries appear here automatically)</small></span>
+    </div>
+    <div class="card-body py-2">
+      <input type="text" id="vendorSearchBox" class="form-control form-control-sm mb-2"
+             placeholder="Search vendor by name or location...">
+      {% if all_vendors %}
+      <div class="table-responsive" style="max-height:400px">
+        <table class="table table-sm mb-0" id="vendorSearchTable">
+          <thead class="table-light sticky-top">
+            <tr>
+              <th>Vendor</th><th>Location</th>
+              <th class="text-end">Trips</th><th class="text-end">Total ₹ (all-time)</th>
+              <th>Last used</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for v in all_vendors %}
+            <tr data-search="{{ (v.name ~ ' ' ~ (v.location or '')) | lower }}">
+              <td>{{ v.name }}</td>
+              <td>{{ v.location or '—' }}</td>
+              <td class="text-end">{{ v.trips }}</td>
+              <td class="text-end fw-bold">{{ '{:,.0f}'.format(v.total_diesel) }}</td>
+              <td>{{ v.last_used | date if v.last_used else '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div id="vendorSearchEmpty" class="text-muted small py-2" style="display:none">No vendor matches that search.</div>
+      {% else %}
+      <div class="text-muted small">No diesel vendors saved yet — add one from a ledger entry or the Masters page.</div>
+      {% endif %}
+    </div>
+  </div>
 </div>
+
+<script>
+(function() {
+  const box = document.getElementById('vendorSearchBox');
+  const rows = document.querySelectorAll('#vendorSearchTable tbody tr');
+  const empty = document.getElementById('vendorSearchEmpty');
+  if (!box) return;
+  box.addEventListener('input', () => {
+    const q = box.value.trim().toLowerCase();
+    let visible = 0;
+    rows.forEach(r => {
+      const match = !q || (r.dataset.search || '').includes(q);
+      r.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    if (empty) empty.style.display = visible === 0 ? '' : 'none';
+  });
+})();
+</script>
 {% endblock %}
