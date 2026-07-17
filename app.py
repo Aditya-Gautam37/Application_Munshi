@@ -32,6 +32,15 @@ app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True   # always re-read templates on each request
 app.jinja_env.auto_reload = True
 
+# Cloud/container mode: trust the reverse proxy's forwarded headers so
+# request.scheme correctly reports "https" (Fly/most PaaS terminate TLS at the
+# edge and forward plain HTTP internally). Needed for _drive_redirect_uri() to
+# build a correct OAuth callback URL when hosted. No-op for the desktop build
+# (MUNSHI_BEHIND_PROXY unset) — werkzeug ships with Flask, no new dependency.
+if os.environ.get('MUNSHI_BEHIND_PROXY', '').strip() == '1':
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
 # APP_DIR/DB_PATH/UPLOAD_DIR/BACKUP_DIR/ALLOWED_EXTS/MAX_EXTRACTION_FILES stay
 # plain module-level names here (not read off a Config instance at call time)
 # because tests/test_smoke.py reassigns APP_DIR/DB_PATH/BACKUP_DIR/UPLOAD_DIR
@@ -51,13 +60,14 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.secret_key = resolve_secret_key(APP_DIR, logger=app.logger)
 # Session-cookie hardening (matches the license server). SameSite=Lax blocks
 # cross-site POSTs (a first line of CSRF defence for the POST forms); HttpOnly
-# hides the cookie from JS. Secure is intentionally OFF because Munshi runs over
+# hides the cookie from JS. Secure is OFF by default because Munshi runs over
 # http://127.0.0.1, not HTTPS — marking Secure would make the browser drop the
-# cookie and log everyone out. (Set SESSION_COOKIE_SECURE=True only if you ever
-# serve Munshi over HTTPS.)
+# cookie and log everyone out. Set MUNSHI_HTTPS=1 (done automatically in the
+# container image) when Munshi is actually served over HTTPS, e.g. hosted.
 app.config.update(
     SESSION_COOKIE_SAMESITE='Lax',
     SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=(os.environ.get('MUNSHI_HTTPS', '').strip() == '1'),
 )
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
@@ -1850,6 +1860,52 @@ import threading as _threading_mod
 # immediately rather than queueing. Prevents a thread storm when many requests
 # come in while Drive is unreachable.
 _drive_sync_lock = _threading_mod.Lock()
+
+
+# ── S3-compatible off-volume backup (hosted/cloud tenants only) ─────────────
+# A second line of defense beyond the hosting platform's own volume snapshots:
+# a lost volume shouldn't mean lost data for a tenant who no longer has a
+# local laptop copy the way a desktop install does. Entirely optional and
+# additive — gated by MUNSHI_S3_BACKUP_BUCKET, never configured on a desktop
+# install, and boto3 is excluded from the PyInstaller bundle (build/munshi.spec)
+# so it never ships in the desktop installer either.
+_s3_sync_lock = _threading_mod.Lock()
+
+
+def _s3_backup_configured():
+    return bool(os.environ.get('MUNSHI_S3_BACKUP_BUCKET', '').strip())
+
+
+def _s3_sync_now(backup_path, today):
+    """Push today's local backup file to S3-compatible object storage.
+       Re-entrant safe: if another push is already running, this call exits
+       immediately — same pattern as _drive_sync_now()."""
+    if not _s3_sync_lock.acquire(blocking=False):
+        return
+    try:
+        bucket = os.environ.get('MUNSHI_S3_BACKUP_BUCKET', '').strip()
+        if not bucket or not os.path.exists(backup_path):
+            return
+        tenant = os.environ.get('MUNSHI_TENANT_SLUG', '').strip() or 'default'
+        key = f'{tenant}/bills-{today}.db'
+        try:
+            import boto3
+            client = boto3.client(
+                's3',
+                endpoint_url=os.environ.get('MUNSHI_S3_ENDPOINT_URL') or None,
+                region_name=os.environ.get('MUNSHI_S3_REGION') or None,
+            )
+            client.upload_file(backup_path, bucket, key)
+            set_setting('last_s3_backup_at', datetime.now().isoformat(timespec='seconds'))
+            set_setting('last_s3_backup_error', '')
+        except Exception as e:
+            app.logger.warning(f'S3 backup sync failed: {e}')
+            try:
+                set_setting('last_s3_backup_error', str(e))
+            except Exception:
+                pass
+    finally:
+        _s3_sync_lock.release()
 
 
 def _drive_sync_now():
@@ -5599,6 +5655,16 @@ def backup_db_if_needed():
     except Exception as e:
         app.logger.warning(f'Drive sync dispatch failed (non-fatal): {e}')
 
+    # S3-compatible sync: hosted/cloud tenants only, see _s3_sync_now() above.
+    try:
+        if _s3_backup_configured():
+            already_synced_today = (get_setting('last_s3_backup_at') or '').startswith(today)
+            if fresh_backup or not already_synced_today:
+                import threading
+                threading.Thread(target=_s3_sync_now, args=(backup_path, today), daemon=True).start()
+    except Exception as e:
+        app.logger.warning(f'S3 backup dispatch failed (non-fatal): {e}')
+
 
 def _backup_health():
     """Plain-English backup status for the dashboard 'Data Vault' tile.
@@ -5859,7 +5925,9 @@ if __name__ == '__main__':
 
     def open_browser():
         webbrowser.open(f'http://127.0.0.1:{port}')
-    if not os.environ.get('PORT'):  # don't auto-open in preview/dev mode
+    # MUNSHI_HEADLESS=1 (set in the container image) explicitly skips the
+    # auto-open — there's no local browser to open in a hosted deployment.
+    if os.environ.get('MUNSHI_HEADLESS', '').strip() != '1':
         Timer(1.2, open_browser).start()
 
     if host != '127.0.0.1':

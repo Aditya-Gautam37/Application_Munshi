@@ -72,6 +72,14 @@ a = Analysis(
         # Trim — none of these are used by us
         'matplotlib', 'numpy', 'pandas', 'scipy', 'tk', 'tkinter',
         'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'IPython',
+        # S3 backup push (boto3) is cloud-hosted-tenant only, gated by
+        # MUNSHI_S3_BACKUP_BUCKET which is never set on a desktop install —
+        # excluded here so it doesn't bloat the desktop installer.
+        'boto3', 'botocore', 's3transfer',
+        # munshi/pg/ (Supabase/Postgres multi-tenant web stack) is a separate
+        # deployment target from this desktop installer — app.py never
+        # imports it, but excluded explicitly in case that changes.
+        'psycopg', 'alembic', 'jwt',
     ],
     cipher=block_cipher,
     noarchive=False,

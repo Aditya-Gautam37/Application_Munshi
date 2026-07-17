@@ -1,0 +1,33 @@
+# Template fly.toml for a single Munshi tenant. NOT deployed directly — copy
+# per tenant (or pass via `fly deploy --config`) with app set to the real
+# tenant app name, e.g. munshi-<slug>. See the onboarding steps in
+# C:\Users\adity\.claude\plans\jaunty-wobbling-swing.md for the full sequence
+# (fly apps create / fly volumes create / fly secrets set / fly deploy).
+
+app = "munshi-jainpur-logistic"
+primary_region = "bom"  # Mumbai — closest Fly region to Indian customers; adjust per tenant if needed
+
+[build]
+
+[mounts]
+  source = "munshi_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

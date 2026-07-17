@@ -16,6 +16,12 @@ from datetime import timedelta
 
 def resolve_app_dir(caller_file):
     """APP_DIR resolution:
+         - Cloud/container mode: MUNSHI_APP_DIR env var wins outright, if set.
+           Lets a hosted tenant's data (bills.db/uploads/backups/.flask_secret)
+           live on a mounted volume (e.g. /data) while the code itself ships
+           baked into the image — those must be separate directories, or every
+           redeploy either wipes tenant data or requires baking the volume
+           with a full code copy.
          - In source-run mode (`python3 app.py`): the caller's own directory.
          - In PyInstaller bundle mode: the directory of the EXECUTABLE (next to
            the customer's bills.db / uploads / backups). NOT sys._MEIPASS, which
@@ -26,6 +32,9 @@ def resolve_app_dir(caller_file):
        (app.py), passed in explicitly — this module's own `__file__` lives
        inside the munshi/ package, not the project root.
     """
+    env_dir = os.environ.get('MUNSHI_APP_DIR', '').strip()
+    if env_dir:
+        return os.path.abspath(env_dir)
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(caller_file))

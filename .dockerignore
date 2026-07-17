@@ -1,0 +1,36 @@
+# Docker's build context ignores .gitignore entirely — this file exists so a
+# local dev checkout never accidentally bakes a real DB or secret into the
+# image. Keep in sync with the equivalent entries in .gitignore.
+
+.env
+.flask_secret
+
+*.db
+*.sqlite
+*.sqlite3
+*.db.backup
+*.db-*
+bills*.db*
+data.db
+!data/seed.db
+!data/seed_blank.db
+!data/seed_demo.db
+
+backups/
+uploads/
+sample-vbls/
+
+.git/
+.claude/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+build/
+license-server/
+
+.DS_Store
+Thumbs.db

@@ -41,3 +41,27 @@ SQLAlchemy>=2.0.51,<3
 # transitively (via google-genai's dependency on it); now a direct dependency
 # since the app imports it itself. SemVer, stable 2.x line.
 pydantic>=2.13.4,<3
+
+# S3-compatible off-volume backup push for hosted/cloud tenants only (gated by
+# MUNSHI_S3_BACKUP_BUCKET — see backup_db_if_needed() in app.py). Never used by
+# the desktop build, and explicitly excluded from the PyInstaller bundle in
+# build/munshi.spec to keep the desktop installer lean.
+boto3>=1.34.0,<2
+
+# ── Supabase/Postgres multi-tenant stack (munshi/pg/) — see the migration
+# plan at .claude/plans/polished-tumbling-reef.md. Not used by the desktop
+# build; excluded from build/munshi.spec same as boto3 above.
+
+# Postgres driver for SQLAlchemy (psycopg 3's binary wheel, no compiler
+# needed on Windows, same reasoning as waitress above).
+psycopg[binary]>=3.2.0,<4
+
+# Schema migrations for the Postgres schema (munshi/pg/models.py is the
+# source of truth Alembic diffs against; init_db()'s raw SQL remains the
+# schema authority for the *SQLite* path only).
+alembic>=1.14.0,<2
+
+# Validates Supabase-issued JWTs locally (JWKS) — replaces Flask session
+# cookies as the auth transport for the API. requires `cryptography` for
+# RS256 verification.
+PyJWT[crypto]>=2.10.0,<3
