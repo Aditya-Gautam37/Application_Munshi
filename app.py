@@ -426,6 +426,10 @@ def init_db():
     _add_column_if_missing(conn, 'ledger_entries', 'detention', 'REAL DEFAULT 0')
     _add_column_if_missing(conn, 'ledger_entries', 'toll_tax',  'REAL DEFAULT 0')
     _add_column_if_missing(conn, 'ledger_entries', 'excess_km', 'REAL DEFAULT 0')
+    # Delivery date: when the goods actually reached the consignee, entered
+    # manually at POD time — distinct from pod_date (when the signed proof
+    # came back, which can lag the actual delivery by days).
+    _add_column_if_missing(conn, 'ledger_entries', 'delivery_date', 'TEXT')
 
     # Phase G — GST-compliant invoicing
     # `total_amount` stays the GRAND total (incl. tax) for backward compatibility.
@@ -4717,19 +4721,20 @@ def ledger_pod(le_id):
     # bulk actions) don't submit these fields at all — only the full POD
     # modal does. Fall back to the existing DB value when a field is
     # missing from the submission, so a quick tap never silently zeroes
-    # out an adjustment someone already entered.
+    # out an adjustment (or the delivery date) someone already entered.
     adjustments = {
         name: (_safe_num(f.get(name)) if name in f else before.get(name)) or 0
         for name in _POD_ADJUSTMENT_FIELDS
     }
+    delivery_date = f.get('delivery_date') if 'delivery_date' in f else before.get('delivery_date')
 
     if pod_image_rel:
         conn.execute('''UPDATE ledger_entries SET
-                          pod_received=?, pod_date=?, pod_image=?,
+                          pod_received=?, pod_date=?, pod_image=?, delivery_date=?,
                           shortage=?, leakage=?, breakage=?, unloading=?,
                           detention=?, toll_tax=?, excess_km=?,
                           updated_at=? WHERE id=?''',
-                     (pod_received, pod_date, pod_image_rel,
+                     (pod_received, pod_date, pod_image_rel, delivery_date,
                       adjustments['shortage'], adjustments['leakage'],
                       adjustments['breakage'], adjustments['unloading'],
                       adjustments['detention'], adjustments['toll_tax'],
@@ -4737,11 +4742,11 @@ def ledger_pod(le_id):
                       datetime.now().isoformat(), le_id))
     else:
         conn.execute('''UPDATE ledger_entries SET
-                          pod_received=?, pod_date=?,
+                          pod_received=?, pod_date=?, delivery_date=?,
                           shortage=?, leakage=?, breakage=?, unloading=?,
                           detention=?, toll_tax=?, excess_km=?,
                           updated_at=? WHERE id=?''',
-                     (pod_received, pod_date,
+                     (pod_received, pod_date, delivery_date,
                       adjustments['shortage'], adjustments['leakage'],
                       adjustments['breakage'], adjustments['unloading'],
                       adjustments['detention'], adjustments['toll_tax'],
@@ -4749,7 +4754,8 @@ def ledger_pod(le_id):
                       datetime.now().isoformat(), le_id))
 
     # Audit
-    adj_changes = _diff_dict(before, adjustments, fields=_POD_ADJUSTMENT_FIELDS)
+    adj_changes = _diff_dict(before, {**adjustments, 'delivery_date': delivery_date},
+                             fields=list(_POD_ADJUSTMENT_FIELDS) + ['delivery_date'])
     if before.get('pod_received') != pod_received:
         action = 'POD received' if pod_received else 'POD un-marked'
         if pod_image_rel and pod_received:

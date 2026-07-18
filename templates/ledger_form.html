@@ -195,12 +195,19 @@
               <label class="form-check-label fw-semibold" for="pod_received">POD received</label>
             </div>
             <div class="row g-2 align-items-end">
-              <div class="col-md-5">
+              <div class="col-md-4">
+                <label class="form-label small">Delivery Date</label>
+                <input type="date" name="delivery_date" class="form-control form-control-sm"
+                       value="{{ entry.delivery_date or '' }}">
+                <small class="text-muted">When goods reached the consignee.</small>
+              </div>
+              <div class="col-md-4">
                 <label class="form-label small">POD Date</label>
                 <input type="date" name="pod_date" class="form-control form-control-sm"
                        value="{{ entry.pod_date or today }}">
+                <small class="text-muted">When the signed proof came back.</small>
               </div>
-              <div class="col-md-7">
+              <div class="col-md-4">
                 <label class="form-label small">POD photo (optional)</label>
                 <input type="file" name="pod_image" class="form-control form-control-sm"
                        accept=".jpg,.jpeg,.png,.pdf,.webp">

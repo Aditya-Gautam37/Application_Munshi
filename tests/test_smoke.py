@@ -738,3 +738,33 @@ def test_pod_adjustments_sync_into_already_paid_trip(client):
     # balance still nets to zero (paid the net owed, not stale at 10000).
     balance = appmod.get_party_balance("transporter", tid)
     assert balance == 0, f"auto-payment should re-sync with the new net after POD edit, got {balance}"
+
+
+def test_pod_delivery_date_saved_and_not_reset_by_quick_tap(client):
+    """delivery_date (manually entered, distinct from pod_date) must persist,
+    and — like the settlement adjustments — must not be wiped by a quick
+    one-tap POD action that doesn't submit it."""
+    _login_ready(client)
+    tid = _create_transporter(client, "DeliveryDate Test Transport")
+    le_id = _create_ledger_entry(tid, freight=5000)
+
+    client.get(f"/ledger/{le_id}")
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "delivery_date": "2026-07-17",
+    }, content_type="multipart/form-data", follow_redirects=False)
+
+    row = appmod.get_db().execute(
+        "SELECT delivery_date FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+    assert row["delivery_date"] == "2026-07-17"
+
+    # Quick re-tap without delivery_date in the payload.
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-20",
+    }, content_type="multipart/form-data", follow_redirects=False)
+
+    row = appmod.get_db().execute(
+        "SELECT delivery_date FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+    assert row["delivery_date"] == "2026-07-17", "quick re-tap must not reset delivery_date"

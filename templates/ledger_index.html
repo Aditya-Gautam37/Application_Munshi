@@ -194,11 +194,17 @@
           </div>
           <div class="modal-body">
             <div class="row g-2 mb-3">
-              <div class="col-md-6">
+              <div class="col-md-4">
+                <label class="form-label small">Delivery Date</label>
+                <input type="date" name="delivery_date" id="podModalDeliveryDate" class="form-control form-control-sm">
+                <small class="text-muted">When the goods actually reached the consignee.</small>
+              </div>
+              <div class="col-md-4">
                 <label class="form-label small">POD Date</label>
                 <input type="date" name="pod_date" id="podModalDate" class="form-control form-control-sm">
+                <small class="text-muted">When the signed proof came back to you.</small>
               </div>
-              <div class="col-md-6">
+              <div class="col-md-4">
                 <label class="form-label small">POD photo (optional)</label>
                 <input type="file" name="pod_image" class="form-control form-control-sm"
                        accept=".jpg,.jpeg,.png,.pdf,.webp">
@@ -262,7 +268,9 @@
           const grNo = btn.getAttribute('data-gr-no');
           document.getElementById('podAdjustForm').action = '/ledger/' + leId + '/pod';
           document.getElementById('podModalGrNo').textContent = grNo;
-          document.getElementById('podModalDate').value = new Date().toISOString().slice(0, 10);
+          const todayStr = new Date().toISOString().slice(0, 10);
+          document.getElementById('podModalDate').value = todayStr;
+          document.getElementById('podModalDeliveryDate').value = todayStr;
         });
       }
     })();
