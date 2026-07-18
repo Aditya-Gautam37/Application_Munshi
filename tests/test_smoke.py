@@ -477,3 +477,139 @@ def test_restore_is_atomic_and_wal_safe(client):
 
     # The app keeps working on the restored DB.
     assert _create_bill(client, "STATE-A CO", 500).status_code in (301, 302)
+
+
+# ── (G) Challan + invoice extraction: correct field-merge behavior ─────────────
+#
+# /challan/extract accepts two OPTIONAL photos — the transporter's own
+# challan/LR and the consignor's separate commercial invoice (a different
+# physical document). Real Gemini calls are mocked (deterministic, no
+# network, no API cost) so these tests pin down the MERGE logic itself:
+# challan-only, invoice-only, and both together — where the invoice's
+# fields must win for invoice-specific data, but must NOT silently
+# override consignor/consignee read off the challan photo.
+
+import io  # noqa: E402
+
+
+def _fake_challan_result(**overrides):
+    data = {
+        "lr_no": "9001", "challan_date": "2026-07-18",
+        "consignor_name": "CHALLAN CONSIGNOR", "consignor_address": "Kanpur",
+        "consignee_name": "CHALLAN CONSIGNEE", "consignee_address": "Pune",
+        "from_city_state": "Kanpur, UP", "to_city_state": "Pune, MH",
+        "invoice_no": "CHALLAN-INV-1", "invoice_date": "2026-07-01",
+        "consignment_value": 1000, "gst_number": "CHALLANGSTIN",
+        "no_of_articles": "10", "description": "from challan photo",
+        "value_of_goods": 1000, "weight_kg": 500,
+        "truck_no": "UP78AB1234", "driver_name": "Ramu", "driver_mobile": "9000000001",
+        "confidence_per_field": {"lr_no": "low"},
+    }
+    data.update(overrides)
+    return {"ok": True, "data": data, "error": None, "raw": "{}"}
+
+
+def _fake_invoice_result(**overrides):
+    data = {
+        "invoice_no": "INVOICE-REAL-99", "invoice_date": "2026-07-05",
+        "gst_number": "INVOICEGSTIN", "consignment_value": 5000,
+        "no_of_articles": "20", "description": "from invoice photo",
+        "value_of_goods": 5000,
+        "consignor_name": "INVOICE CONSIGNOR", "consignor_address": "Delhi",
+        "consignee_name": "INVOICE CONSIGNEE", "consignee_address": "Mumbai",
+        "confidence_per_field": {"invoice_no": "medium"},
+    }
+    data.update(overrides)
+    return {"ok": True, "data": data, "error": None, "raw": "{}"}
+
+
+def _post_extract(client, monkeypatch, challan_result=None, invoice_result=None):
+    if challan_result is not None:
+        monkeypatch.setattr(appmod, "extract_challan_image", lambda path: challan_result)
+    if invoice_result is not None:
+        monkeypatch.setattr(appmod, "extract_invoice_image", lambda path: invoice_result)
+
+    client.get("/challan/extract")
+    token = _csrf(client)
+    data = {"csrf_token": token}
+    if challan_result is not None:
+        data["challan_file"] = (io.BytesIO(b"fake-jpeg-bytes"), "challan.jpg")
+    if invoice_result is not None:
+        data["invoice_file"] = (io.BytesIO(b"fake-jpeg-bytes"), "invoice.jpg")
+    return client.post("/challan/extract", data=data, content_type="multipart/form-data",
+                        follow_redirects=False)
+
+
+def test_challan_only_extraction(client, monkeypatch):
+    """Only a challan photo — works exactly as before this feature existed."""
+    _login_ready(client)
+    resp = _post_extract(client, monkeypatch, challan_result=_fake_challan_result())
+    assert resp.status_code in (301, 302)
+    cid = int(re.search(r"/challan/(\d+)", resp.headers["Location"]).group(1))
+    row = appmod.get_db().execute("SELECT * FROM challans WHERE id=?", (cid,)).fetchone()
+    assert row["consignor_name"] == "CHALLAN CONSIGNOR"
+    assert row["invoice_no"] == "CHALLAN-INV-1"  # challan photo's own guess, no invoice photo given
+    assert row["source_image"] is not None
+    assert row["invoice_source_image"] is None
+
+
+def test_invoice_only_extraction(client, monkeypatch):
+    """Only an invoice photo — fills invoice fields + consignor/consignee
+    (no challan photo to read those from), leaves challan-specific fields
+    (truck/driver) blank."""
+    _login_ready(client)
+    resp = _post_extract(client, monkeypatch, invoice_result=_fake_invoice_result())
+    assert resp.status_code in (301, 302)
+    cid = int(re.search(r"/challan/(\d+)", resp.headers["Location"]).group(1))
+    row = appmod.get_db().execute("SELECT * FROM challans WHERE id=?", (cid,)).fetchone()
+    assert row["invoice_no"] == "INVOICE-REAL-99"
+    assert row["consignor_name"] == "INVOICE CONSIGNOR"  # invoice-only mode: OK to fill this in
+    assert row["truck_no"] == ""  # nothing read this — must stay blank, not crash
+    assert row["source_image"] is None
+    assert row["invoice_source_image"] is not None
+
+
+def test_challan_and_invoice_together_merge_correctly(client, monkeypatch):
+    """Both photos at once: invoice-specific fields (invoice_no/value/etc.)
+    must come from the INVOICE photo (more authoritative), but consignor/
+    consignee must stay from the CHALLAN photo — the invoice must not
+    silently overwrite what the challan photo already showed."""
+    _login_ready(client)
+    resp = _post_extract(
+        client, monkeypatch,
+        challan_result=_fake_challan_result(),
+        invoice_result=_fake_invoice_result(),
+    )
+    assert resp.status_code in (301, 302)
+    cid = int(re.search(r"/challan/(\d+)", resp.headers["Location"]).group(1))
+    row = appmod.get_db().execute("SELECT * FROM challans WHERE id=?", (cid,)).fetchone()
+
+    # Invoice-specific fields: invoice photo wins.
+    assert row["invoice_no"] == "INVOICE-REAL-99"
+    assert row["gst_number"] == "INVOICEGSTIN"
+    assert row["value_of_goods"] == 5000
+
+    # Challan-specific fields: only the challan photo could have supplied these.
+    assert row["truck_no"] == "UP78AB1234"
+    assert row["driver_name"] == "Ramu"
+
+    # Consignor/consignee: must stay from the CHALLAN photo, not get
+    # silently overwritten by the invoice photo's own guess.
+    assert row["consignor_name"] == "CHALLAN CONSIGNOR"
+    assert row["consignee_name"] == "CHALLAN CONSIGNEE"
+
+    # Both photos were saved, both raw extractions kept.
+    assert row["source_image"] is not None
+    assert row["invoice_source_image"] is not None
+
+
+def test_extract_requires_at_least_one_photo(client):
+    """POSTing with neither file must not crash — it should just bounce back
+    to the upload page with a flash message."""
+    _login_ready(client)
+    client.get("/challan/extract")
+    token = _csrf(client)
+    resp = client.post("/challan/extract", data={"csrf_token": token},
+                        content_type="multipart/form-data", follow_redirects=False)
+    assert resp.status_code in (301, 302)
+    assert "/challan/extract" in resp.headers.get("Location", "")

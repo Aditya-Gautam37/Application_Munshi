@@ -48,3 +48,7 @@ class Challan(Base):
     # Phase D/F — cross-stage links
     ledger_entry_id: Mapped[int | None] = mapped_column(Integer)
     pod_doc_no: Mapped[str | None] = mapped_column(Text)
+
+    # Phase H — separate invoice photo (mirrors source_image/raw_extraction)
+    invoice_source_image: Mapped[str | None] = mapped_column(Text)
+    invoice_raw_extraction: Mapped[str | None] = mapped_column(Text)

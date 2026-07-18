@@ -326,6 +326,11 @@ class Challan(Base):
     ledger_entry_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('ledger_entries.id'))
     pod_doc_no: Mapped[str | None] = mapped_column(Text)
 
+    # Separate invoice photo — the consignor's own commercial invoice is
+    # often a different physical paper from the LR/challan.
+    invoice_source_image: Mapped[str | None] = mapped_column(Text)
+    invoice_raw_extraction: Mapped[dict | None] = mapped_column(JSONB)
+
 
 class LedgerEntry(Base):
     __tablename__ = 'ledger_entries'

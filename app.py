@@ -406,6 +406,12 @@ def init_db():
     # In normal flow they match; the gap surfaces typos / wrong PoDs.
     _add_column_if_missing(conn, 'challans',       'pod_doc_no', 'TEXT')
     _add_column_if_missing(conn, 'ledger_entries', 'weight_kg',  'REAL')
+    # Phase H — separate invoice photo (the consignor's own commercial invoice
+    # is often a different physical paper from the LR/challan). Mirrors
+    # source_image/raw_extraction so a challan can carry results from up to
+    # two independent Gemini calls — one per document.
+    _add_column_if_missing(conn, 'challans', 'invoice_source_image',  'TEXT')
+    _add_column_if_missing(conn, 'challans', 'invoice_raw_extraction', 'TEXT')
 
     # Phase G — GST-compliant invoicing
     # `total_amount` stays the GRAND total (incl. tax) for backward compatibility.
@@ -3908,6 +3914,76 @@ Rules:
 """
 
 
+INVOICE_EXTRACTION_PROMPT = """You are reading the CONSIGNOR'S OWN COMMERCIAL INVOICE — a separate
+document from the transporter's LR/challan, usually printed/typed (not handwritten), listing what
+goods are being shipped and their value. It may be a plain printed invoice, a computer-generated
+GST tax invoice, or a simple bill format. It is NOT the transporter's goods consignment note.
+
+Read carefully — the photo may be at an angle or slightly blurred. Where unsure, give your BEST
+guess and mark "low" or "medium" confidence.
+
+Return ONLY a JSON object matching this schema (no prose, no markdown fences):
+
+{
+  "invoice_no":        "string — the invoice/bill number printed on the document",
+  "invoice_date":      "YYYY-MM-DD — the invoice date",
+  "gst_number":        "string — the seller's/consignor's GSTIN printed on the invoice (often near the top)",
+  "consignment_value":  number,
+  "no_of_articles":    "string — total quantity/units shipped, as printed (e.g. '610Nag', '1115')",
+  "description":       "string — description of goods, as printed",
+  "value_of_goods":     number,
+  "consignor_name":    "string — the seller/consignor company name printed at the top of the invoice",
+  "consignor_address": "string — the seller/consignor's printed address",
+  "consignee_name":    "string — the buyer/consignee ('Bill To' / 'Ship To') company name",
+  "consignee_address": "string — the buyer/consignee's printed address",
+  "confidence_per_field": {},
+  "notes": "string — anything unusual"
+}
+
+Rules:
+- If a field is blank/absent on the invoice, return "" or 0 / null appropriately.
+- Dates: convert to YYYY-MM-DD strictly.
+- Confidence: only include fields where you're "low" or "medium" confidence (omit if high).
+- Prefer the invoice's own printed total/taxable value for value_of_goods over a grand total
+  that includes tax, if both are shown separately.
+"""
+
+
+def extract_invoice_image(file_path):
+    """Send one invoice image/PDF to Gemini and return parsed JSON dict.
+       Mirrors extract_challan_image() — same call shape, different prompt,
+       since this reads a different physical document (the consignor's own
+       commercial invoice, not the transporter's LR/challan)."""
+    client, err = _get_gemini_client()
+    if err:
+        return {"ok": False, "data": {}, "error": err, "raw": ""}
+
+    try:
+        pil_img = _load_image_for_gemini(file_path)
+    except Exception as e:
+        return {"ok": False, "data": {}, "error": f"Could not load image: {e}", "raw": ""}
+
+    try:
+        from google.genai import types
+        response = _gemini_call_with_retry(lambda: client.models.generate_content(
+            model=os.environ.get('GEMINI_MODEL', 'gemini-flash-latest'),
+            contents=[pil_img, INVOICE_EXTRACTION_PROMPT],
+            config=types.GenerateContentConfig(
+                response_mime_type='application/json',
+                temperature=0.0,
+                max_output_tokens=4096,
+            ),
+        ))
+    except Exception as e:
+        return {"ok": False, "data": {}, "error": _friendly_gemini_error(e), "raw": ""}
+
+    raw = (response.text or '').strip()
+    data, parse_warn = _try_parse_gemini_json(raw)
+    if data is not None:
+        return {"ok": True, "data": data, "error": parse_warn, "raw": raw}
+    return {"ok": False, "data": {}, "error": parse_warn or "Could not parse Gemini output", "raw": raw}
+
+
 def extract_challan_image(file_path):
     """Send one challan image/PDF to Gemini and return parsed JSON dict."""
     client, err = _get_gemini_client()
@@ -4013,34 +4089,78 @@ def challan_new_manual():
     return redirect(url_for('challan_review', challan_id=chl_id))
 
 
+def _save_challan_upload(upload):
+    """Save one uploaded challan/invoice photo under uploads/challans/.
+       Returns (full_path, rel_name, error) — error is None on success."""
+    ext = Path(upload.filename).suffix.lower()
+    if ext not in ALLOWED_EXTS:
+        return None, None, f'Unsupported file type: {upload.filename}. Use JPG, PNG, PDF.'
+    chl_dir = os.path.join(UPLOAD_DIR, 'challans')
+    os.makedirs(chl_dir, exist_ok=True)
+    safe_name = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}_{uuid.uuid4().hex[:8]}{ext}'
+    full_path = os.path.join(chl_dir, safe_name)
+    upload.save(full_path)
+    return full_path, f'challans/{safe_name}', None
+
+
 @app.route('/challan/extract', methods=['GET', 'POST'])
 def challan_extract_upload():
     if request.method == 'POST':
-        f = request.files.get('file')
-        if not f or not f.filename:
-            flash('Please choose a challan photo or PDF.')
-            return redirect(url_for('challan_extract_upload'))
-        ext = Path(f.filename).suffix.lower()
-        if ext not in ALLOWED_EXTS:
-            flash(f'Unsupported file type: {f.filename}. Use JPG, PNG, PDF.')
+        challan_upload = request.files.get('challan_file')
+        invoice_upload = request.files.get('invoice_file')
+        has_challan = bool(challan_upload and challan_upload.filename)
+        has_invoice = bool(invoice_upload and invoice_upload.filename)
+        if not has_challan and not has_invoice:
+            flash('Please choose a challan photo, an invoice photo, or both.')
             return redirect(url_for('challan_extract_upload'))
 
-        # Save to uploads/challans/
-        chl_dir = os.path.join(UPLOAD_DIR, 'challans')
-        os.makedirs(chl_dir, exist_ok=True)
-        safe_name = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}_{uuid.uuid4().hex[:8]}{ext}'
-        full_path = os.path.join(chl_dir, safe_name)
-        f.save(full_path)
-        rel_name = f'challans/{safe_name}'
+        d = {}
+        confidence = {}
+        challan_rel = challan_raw = None
+        invoice_rel = invoice_raw = None
 
-        # Extract via Gemini
-        result = extract_challan_image(full_path)
-        if not result['ok']:
-            flash(f'Extraction failed: {result["error"]}')
-            return redirect(url_for('challan_extract_upload'))
+        if has_challan:
+            full_path, challan_rel, err = _save_challan_upload(challan_upload)
+            if err:
+                flash(err)
+                return redirect(url_for('challan_extract_upload'))
+            result = extract_challan_image(full_path)
+            if not result['ok']:
+                flash(f'Challan extraction failed: {result["error"]}')
+                return redirect(url_for('challan_extract_upload'))
+            challan_raw = result['raw']
+            cd = result['data']
+            confidence.update(cd.get('confidence_per_field', {}))
+            d.update(cd)   # challan fields (LR/consignor/consignee/truck/driver/...) form the base
+
+        if has_invoice:
+            full_path, invoice_rel, err = _save_challan_upload(invoice_upload)
+            if err:
+                flash(err)
+                return redirect(url_for('challan_extract_upload'))
+            result = extract_invoice_image(full_path)
+            if not result['ok']:
+                flash(f'Invoice extraction failed: {result["error"]}')
+                return redirect(url_for('challan_extract_upload'))
+            invoice_raw = result['raw']
+            idata = result['data']
+            confidence.update(idata.get('confidence_per_field', {}))
+            # Invoice-specific fields always come from the invoice photo when
+            # one was provided — it's the more authoritative source for these,
+            # even if the challan photo also guessed at them.
+            for key in ('invoice_no', 'invoice_date', 'gst_number', 'consignment_value',
+                        'no_of_articles', 'description', 'value_of_goods'):
+                if idata.get(key) not in (None, ''):
+                    d[key] = idata[key]
+            # Consignor/consignee only come from the invoice when there's no
+            # challan photo to read them from — a second document shouldn't
+            # silently override what the challan photo already showed.
+            if not has_challan:
+                for key in ('consignor_name', 'consignor_address', 'consignee_name', 'consignee_address'):
+                    if idata.get(key) not in (None, ''):
+                        d[key] = idata[key]
 
         # Save as draft challan (status='draft' until reviewed & saved)
-        d = result['data']
         extracted_lr = (d.get('lr_no') or '').strip()
         # Use extracted LR if numeric AND free; else auto-find a free one.
         candidate = extracted_lr if extracted_lr.isdigit() else ''
@@ -4057,8 +4177,9 @@ def challan_extract_upload():
                 del_no, shipment_no, cost_no, seal_no,
                 driver_name, driver_mobile, truck_no,
                 gate_in_time, gate_out_time, lane_transit_time, expected_arrival,
-                source_image, raw_extraction, confidence_json, status, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                source_image, raw_extraction, invoice_source_image, invoice_raw_extraction,
+                confidence_json, status, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             lr_no_val, d.get('challan_date'),
             d.get('consignor_name'), d.get('consignor_address'),
@@ -4072,8 +4193,8 @@ def challan_extract_upload():
             d.get('driver_name'), d.get('driver_mobile'), (d.get('truck_no') or '').upper().replace(' ', ''),
             d.get('gate_in_time'), d.get('gate_out_time'),
             d.get('lane_transit_time'), d.get('expected_arrival'),
-            rel_name, result['raw'],
-            json.dumps(d.get('confidence_per_field', {})),
+            challan_rel, challan_raw, invoice_rel, invoice_raw,
+            json.dumps(confidence),
             'draft', datetime.now().isoformat()
         ))
         chl_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]

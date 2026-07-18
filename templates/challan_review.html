@@ -41,11 +41,16 @@
     </div>
   </div>
 
-  {% if challan.status == 'draft' and challan.source_image %}
+  {% if challan.status == 'draft' and (challan.source_image or challan.invoice_source_image) %}
   <div class="alert alert-warning d-flex align-items-center">
     <i class="bi bi-magic me-2 fs-4"></i>
     <div>
-      <strong>AI pre-filled this from the uploaded photo.</strong>
+      <strong>
+        {% if challan.source_image and challan.invoice_source_image %}AI pre-filled this from the challan AND invoice photos.
+        {% elif challan.invoice_source_image %}AI pre-filled this from the uploaded invoice photo.
+        {% else %}AI pre-filled this from the uploaded challan photo.
+        {% endif %}
+      </strong>
       Verify every field. Yellow-highlighted ones are AI's low-confidence reads.
     </div>
   </div>
@@ -59,22 +64,29 @@
   <form method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="row g-3">
-      <!-- LEFT: image preview -->
+      <!-- LEFT: image preview(s) -->
       <div class="col-lg-5">
-        {% if challan.source_image %}
-          {% if challan.source_image.lower().endswith('.pdf') %}
-            <embed src="{{ url_for('serve_upload', filename=challan.source_image) }}" type="application/pdf"
-                   style="width:100%; height:80vh; border:1px solid #ccc;">
-          {% else %}
-            <a href="{{ url_for('serve_upload', filename=challan.source_image) }}" target="_blank">
-              <img src="{{ url_for('serve_upload', filename=challan.source_image) }}"
-                   class="img-fluid border rounded" style="max-height:80vh; cursor:zoom-in"
-                   alt="Challan photo">
-            </a>
-            <div class="text-muted small mt-1 text-center">click to enlarge</div>
-          {% endif %}
-        {% else %}
-          <div class="text-muted text-center p-5 border rounded">No source image</div>
+        {% macro photo_preview(path, label) %}
+          <div class="mb-3">
+            <div class="text-muted small fw-semibold mb-1">{{ label }}</div>
+            {% if path.lower().endswith('.pdf') %}
+              <embed src="{{ url_for('serve_upload', filename=path) }}" type="application/pdf"
+                     style="width:100%; height:45vh; border:1px solid #ccc;">
+            {% else %}
+              <a href="{{ url_for('serve_upload', filename=path) }}" target="_blank">
+                <img src="{{ url_for('serve_upload', filename=path) }}"
+                     class="img-fluid border rounded" style="max-height:45vh; cursor:zoom-in"
+                     alt="{{ label }}">
+              </a>
+              <div class="text-muted small mt-1 text-center">click to enlarge</div>
+            {% endif %}
+          </div>
+        {% endmacro %}
+
+        {% if challan.source_image %}{{ photo_preview(challan.source_image, 'Challan / LR photo') }}{% endif %}
+        {% if challan.invoice_source_image %}{{ photo_preview(challan.invoice_source_image, 'Invoice photo') }}{% endif %}
+        {% if not challan.source_image and not challan.invoice_source_image %}
+          <div class="text-muted text-center p-5 border rounded">No source image (manual entry)</div>
         {% endif %}
       </div>
 
