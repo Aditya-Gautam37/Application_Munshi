@@ -3875,9 +3875,9 @@ Return ONLY a JSON object matching this schema (no prose, no markdown fences):
   "lr_no":             "string — top-right printed/inked LR No. (4-5 digit number, e.g. 13833)",
   "challan_date":      "YYYY-MM-DD — Date: field (DD/MM/YY or DD/MM/YYYY → YYYY-MM-DD)",
   "consignor_name":    "string — Consignor field (the consignor company name as handwritten)",
-  "consignor_address": "string — extra lines under consignor name (e.g. GADAN KHEDA KANPUR)",
+  "consignor_address": "string — ALL text under consignor name: town/area AND any house/street/landmark/pin code on the same or following lines (e.g. GADAN KHEDA KANPUR, or GADAN KHEDA, NEAR ABC DHABA, KANPUR 208001 if more is written)",
   "consignee_name":    "string — Consignee field (handwritten, e.g. MAHAK ENTERPRISES)",
-  "consignee_address": "string — extra lines under consignee name (e.g. BINDKI)",
+  "consignee_address": "string — ALL text under consignee name: town/area AND any house/street/landmark/pin code on the same or following lines (e.g. BINDKI, or BINDKI ROAD, NEAR PETROL PUMP, 209311 if more is written)",
   "from_city_state":   "string — From City, State value (handwritten)",
   "to_city_state":     "string — To City, State value (handwritten)",
   "invoice_no":        "string — Invoice Number (handwritten, e.g. 880207639)",
@@ -3906,6 +3906,11 @@ Return ONLY a JSON object matching this schema (no prose, no markdown fences):
 Rules:
 - HANDWRITING is expected — read every visible written character.
 - If a field is blank/empty on the paper, return "" or 0 / null appropriately.
+- ADDRESS FIELDS (consignor_address, consignee_address): do NOT stop after the first word or
+  the town name alone. Read every line written under the name — house/shop number, street,
+  landmark, area, AND pin code if present — and join them into one string (comma-separated).
+  A short single-word answer like just a town name is almost always INCOMPLETE if there is more
+  handwriting below or beside it on the paper — look again before settling on a short answer.
 - Truck numbers: uppercase, no spaces. "UP 71 T 8680" → "UP71T8680".
 - Driver mobile: 10 digits only, strip any spaces or dashes.
 - Dates: convert to YYYY-MM-DD strictly.
@@ -3933,15 +3938,18 @@ Return ONLY a JSON object matching this schema (no prose, no markdown fences):
   "description":       "string — description of goods, as printed",
   "value_of_goods":     number,
   "consignor_name":    "string — the seller/consignor company name printed at the top of the invoice",
-  "consignor_address": "string — the seller/consignor's printed address",
+  "consignor_address": "string — the seller/consignor's FULL printed address — every line: building/street, area, city, state, pin code. Do not stop at just the city name if more is printed.",
   "consignee_name":    "string — the buyer/consignee ('Bill To' / 'Ship To') company name",
-  "consignee_address": "string — the buyer/consignee's printed address",
+  "consignee_address": "string — the buyer/consignee's FULL printed address — every line: building/street, area, city, state, pin code. Do not stop at just the city name if more is printed.",
   "confidence_per_field": {},
   "notes": "string — anything unusual"
 }
 
 Rules:
 - If a field is blank/absent on the invoice, return "" or 0 / null appropriately.
+- ADDRESS FIELDS: join every printed line into one comma-separated string. A short
+  single-word/single-city answer is almost always incomplete if more text is printed
+  below or beside it — look again before settling on a short answer.
 - Dates: convert to YYYY-MM-DD strictly.
 - Confidence: only include fields where you're "low" or "medium" confidence (omit if high).
 - Prefer the invoice's own printed total/taxable value for value_of_goods over a grand total
