@@ -149,6 +149,12 @@
             <input type="text" id="f_balance" class="form-control form-control-sm fw-bold bg-light" readonly>
           </div>
         </div>
+        {% if entry and (entry.shortage or entry.leakage or entry.breakage or entry.unloading or entry.detention or entry.toll_tax or entry.excess_km) %}
+        <div class="small text-muted mt-2">
+          <i class="bi bi-info-circle me-1"></i>Includes settlement adjustments from POD —
+          see the Proof of Delivery card below to edit them.
+        </div>
+        {% endif %}
       </div>
     </div>
 
@@ -215,6 +221,51 @@
               </div>
             {% endif %}
 
+            <hr class="my-3">
+            <div class="fw-semibold small mb-1">Settlement adjustments (optional)</div>
+            <p class="text-muted small mb-2">
+              Manual ₹ amounts. <strong>Deducted</strong> from what's paid to the transporter:
+              shortage, leakage, breakage, unloading. <strong>Added</strong> on top (reimbursing
+              the transporter's own extra time/expense): detention, toll tax, excess km.
+            </p>
+            <div class="row g-2">
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Shortage (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" id="pod_shortage" name="shortage" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.shortage or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Leakage (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" id="pod_leakage" name="leakage" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.leakage or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Breakage (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" id="pod_breakage" name="breakage" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.breakage or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Unloading (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" id="pod_unloading" name="unloading" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.unloading or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Detention (₹) <span class="text-success">+ add</span></label>
+                <input type="number" id="pod_detention" name="detention" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.detention or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Toll Tax (₹) <span class="text-success">+ add</span></label>
+                <input type="number" id="pod_toll_tax" name="toll_tax" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.toll_tax or '' }}">
+              </div>
+              <div class="col-6 col-md-4">
+                <label class="form-label small">Excess KM (₹) <span class="text-success">+ add</span></label>
+                <input type="number" id="pod_excess_km" name="excess_km" step="any" class="form-control form-control-sm pod-adj"
+                       value="{{ entry.excess_km or '' }}">
+              </div>
+            </div>
+
             <button class="btn btn-warning btn-sm mt-3"><i class="bi bi-check2 me-1"></i>Save POD</button>
           </form>
         </div>
@@ -277,11 +328,15 @@
 <script>
 function recalcBalance() {
   const num = sel => parseFloat(document.getElementById(sel)?.value || 0) || 0;
-  const bal = num('f_freight') - num('f_cash') - num('f_acct') - num('f_diesel');
+  // Must mirror _ledger_balance() in app.py exactly: freight minus on-trip
+  // advances/diesel minus POD-time penalties, plus POD-time reimbursements.
+  const bal = num('f_freight') - num('f_cash') - num('f_acct') - num('f_diesel')
+            - num('pod_shortage') - num('pod_leakage') - num('pod_breakage') - num('pod_unloading')
+            + num('pod_detention') + num('pod_toll_tax') + num('pod_excess_km');
   const out = document.getElementById('f_balance');
   if (out) out.value = bal.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
-document.querySelectorAll('.money').forEach(el => el.addEventListener('input', recalcBalance));
+document.querySelectorAll('.money, .pod-adj').forEach(el => el.addEventListener('input', recalcBalance));
 document.addEventListener('DOMContentLoaded', recalcBalance);
 
 // ── Smart defaults: when vehicle field blurs, fetch last-trip data and offer to apply ──

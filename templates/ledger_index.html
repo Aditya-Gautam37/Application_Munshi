@@ -118,24 +118,11 @@
                 {% endif %}
               </div>
             {% else %}
-              <form method="post" action="{{ url_for('ledger_pod', le_id=e.id) }}"
-                    enctype="multipart/form-data" class="d-inline">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="pod_received" value="1">
-                <div class="btn-group btn-group-sm" role="group">
-                  <button type="submit" class="btn {{ 'btn-danger' if e.overdue else 'btn-warning text-dark' }} py-0 px-2"
-                          title="Mark POD received (today, no photo)">
-                    {% if e.overdue %}⚠ Mark POD{% else %}Mark POD{% endif %}
-                  </button>
-                  <label class="btn {{ 'btn-outline-danger' if e.overdue else 'btn-outline-warning' }} py-0 px-1 mb-0"
-                         title="Mark POD with photo (one tap)">
-                    <i class="bi bi-camera"></i>
-                    <input type="file" name="pod_image" class="d-none"
-                           accept="image/*,.pdf,.heic" capture="environment"
-                           onchange="this.form.submit()">
-                  </label>
-                </div>
-              </form>
+              <button type="button" class="btn btn-sm {{ 'btn-danger' if e.overdue else 'btn-warning text-dark' }} py-0 px-2"
+                      data-bs-toggle="modal" data-bs-target="#podAdjustModal"
+                      data-le-id="{{ e.id }}" data-gr-no="{{ e.gr_no or e.id }}">
+                {% if e.overdue %}⚠ Mark POD{% else %}Mark POD{% endif %}
+              </button>
             {% endif %}
           </td>
           <td data-label="Paid">{{ paid_pill(e.paid, e.paid_mode) }}</td>
@@ -192,6 +179,94 @@
       </button>
     </div>
   </div>
+
+  {# ── Shared "Mark POD" modal — one instance, reused for whichever row's
+        button was clicked (the JS below sets the form's action + GR label). ── #}
+  <div class="modal fade" id="podAdjustModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <form method="post" id="podAdjustForm" enctype="multipart/form-data">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="pod_received" value="1">
+          <div class="modal-header">
+            <h6 class="modal-title"><i class="bi bi-camera me-1"></i>Mark POD — GR <span id="podModalGrNo"></span></h6>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-2 mb-3">
+              <div class="col-md-6">
+                <label class="form-label small">POD Date</label>
+                <input type="date" name="pod_date" id="podModalDate" class="form-control form-control-sm">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label small">POD photo (optional)</label>
+                <input type="file" name="pod_image" class="form-control form-control-sm"
+                       accept=".jpg,.jpeg,.png,.pdf,.webp">
+              </div>
+            </div>
+
+            <div class="fw-semibold small mb-1">Settlement adjustments (optional)</div>
+            <p class="text-muted small mb-2">
+              ₹ amounts. <strong>Deducted</strong> from the transporter's freight: shortage,
+              leakage, breakage, unloading. <strong>Added</strong> on top (reimbursing the
+              transporter's own extra time/expense): detention, toll tax, excess km.
+            </p>
+            <div class="row g-2">
+              <div class="col-6">
+                <label class="form-label small">Shortage (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" name="shortage" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Leakage (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" name="leakage" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Breakage (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" name="breakage" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Unloading (₹) <span class="text-danger">− deduct</span></label>
+                <input type="number" name="unloading" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Detention (₹) <span class="text-success">+ add</span></label>
+                <input type="number" name="detention" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Toll Tax (₹) <span class="text-success">+ add</span></label>
+                <input type="number" name="toll_tax" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Excess KM (₹) <span class="text-success">+ add</span></label>
+                <input type="number" name="excess_km" step="any" class="form-control form-control-sm">
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-warning btn-sm"><i class="bi bi-check2 me-1"></i>Save POD</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const modalEl = document.getElementById('podAdjustModal');
+      if (modalEl) {
+        modalEl.addEventListener('show.bs.modal', event => {
+          const btn = event.relatedTarget;
+          if (!btn) return;
+          const leId = btn.getAttribute('data-le-id');
+          const grNo = btn.getAttribute('data-gr-no');
+          document.getElementById('podAdjustForm').action = '/ledger/' + leId + '/pod';
+          document.getElementById('podModalGrNo').textContent = grNo;
+          document.getElementById('podModalDate').value = new Date().toISOString().slice(0, 10);
+        });
+      }
+    })();
+  </script>
 
   <script>
     (function() {

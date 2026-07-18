@@ -613,3 +613,128 @@ def test_extract_requires_at_least_one_photo(client):
                         content_type="multipart/form-data", follow_redirects=False)
     assert resp.status_code in (301, 302)
     assert "/challan/extract" in resp.headers.get("Location", "")
+
+
+# ── (H) Ledger POD-time settlement adjustments: correct money math ─────────────
+#
+# ledger_pod() lets shortage/leakage/breakage/unloading/detention/toll_tax/
+# excess_km be entered when marking POD. These feed directly into what's owed
+# to the transporter (_ledger_balance() / _transporter_charges_net()) — a
+# formula mismatch here is a real money bug, not just a UI bug. Convention:
+# shortage/leakage/breakage/unloading DEDUCT from freight; detention/
+# toll_tax/excess_km ADD to it.
+
+def _create_transporter(client, name):
+    client.get("/masters")
+    token = _csrf(client)
+    client.post("/masters/transporter/add",
+                 data={"csrf_token": token, "name": name, "mobile": "",
+                       "bank_details": "", "notes": ""},
+                 follow_redirects=False)
+    row = appmod.get_db().execute(
+        "SELECT id FROM transporters WHERE name=?", (name,)).fetchone()
+    return row["id"]
+
+
+def _create_ledger_entry(transporter_id, freight, advance_cash=0, advance_account=0, diesel=0):
+    conn = appmod.get_db()
+    conn.execute(
+        """INSERT INTO ledger_entries
+           (entry_date, gr_no, vehicle_no, freight, advance_cash, advance_account, diesel,
+            transporter_id, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        ("2026-07-18", f"GR-{transporter_id}-TEST", "UP78TEST01", freight, advance_cash,
+         advance_account, diesel, transporter_id, appmod.datetime.now().isoformat()),
+    )
+    conn.commit()
+    le_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.close()
+    return le_id
+
+
+def test_pod_shortage_deducts_from_transporter_balance(client):
+    _login_ready(client)
+    tid = _create_transporter(client, "Shortage Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000)
+    assert appmod.get_party_balance("transporter", tid) == 10000
+
+    client.get(f"/ledger/{le_id}")
+    token = _csrf(client)
+    resp = client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "shortage": "1500",
+    }, content_type="multipart/form-data", follow_redirects=False)
+    assert resp.status_code in (301, 302)
+
+    balance = appmod.get_party_balance("transporter", tid)
+    assert balance == 8500, f"shortage should deduct from balance, got {balance}"
+
+
+def test_pod_detention_toll_excess_km_add_to_transporter_balance(client):
+    _login_ready(client)
+    tid = _create_transporter(client, "Detention Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000)
+
+    client.get(f"/ledger/{le_id}")
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "detention": "800", "toll_tax": "200", "excess_km": "500",
+    }, content_type="multipart/form-data", follow_redirects=False)
+
+    balance = appmod.get_party_balance("transporter", tid)
+    assert balance == 11500, f"detention/toll/excess_km should ADD to balance, got {balance}"
+
+
+def test_pod_quick_mark_does_not_reset_existing_adjustments(client):
+    """A quick one-tap 'Mark POD' (no adjustment fields in the POST) must not
+    silently wipe out adjustments already entered via the full modal."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Quicktap Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000)
+
+    client.get(f"/ledger/{le_id}")
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "shortage": "2000",
+    }, content_type="multipart/form-data", follow_redirects=False)
+    assert appmod.get_party_balance("transporter", tid) == 8000
+
+    # Quick re-tap: only pod_received/pod_date, no adjustment fields at all.
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-20",
+    }, content_type="multipart/form-data", follow_redirects=False)
+
+    balance = appmod.get_party_balance("transporter", tid)
+    assert balance == 8000, f"quick re-tap must not reset the earlier shortage, got {balance}"
+
+
+def test_pod_adjustments_sync_into_already_paid_trip(client):
+    """If a trip is already marked paid (auto-payment row exists), editing
+    adjustments afterward must update that payment row too, or the
+    transporter's balance would silently disagree with what Payments shows."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Resync Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000)
+
+    # Mark paid first, with no adjustments yet -- auto payment = 10000.
+    client.get(f"/ledger/{le_id}")
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/paid", data={
+        "csrf_token": token, "paid": "1", "paid_date": "2026-07-19", "paid_mode": "Cash",
+    }, follow_redirects=False)
+    assert appmod.get_party_balance("transporter", tid) == 0
+
+    # Now record a shortage after the fact.
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "shortage": "1000",
+    }, content_type="multipart/form-data", follow_redirects=False)
+
+    # The auto-payment mirror must have followed the adjustment, so the
+    # balance still nets to zero (paid the net owed, not stale at 10000).
+    balance = appmod.get_party_balance("transporter", tid)
+    assert balance == 0, f"auto-payment should re-sync with the new net after POD edit, got {balance}"

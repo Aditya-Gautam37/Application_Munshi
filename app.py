@@ -412,6 +412,20 @@ def init_db():
     # two independent Gemini calls — one per document.
     _add_column_if_missing(conn, 'challans', 'invoice_source_image',  'TEXT')
     _add_column_if_missing(conn, 'challans', 'invoice_raw_extraction', 'TEXT')
+    # Phase I — POD-time settlement adjustments against the transporter's
+    # freight. All entered manually (₹ amounts), set when marking POD via
+    # ledger_pod(). Convention (see _ledger_balance()): shortage/leakage/
+    # breakage/unloading REDUCE what's paid to the transporter; detention/
+    # toll_tax/excess_km ADD to it (compensating for the transporter's own
+    # extra time/expense). This convention is a default, not confirmed
+    # per-field with the business owner — labeled explicitly in the UI.
+    _add_column_if_missing(conn, 'ledger_entries', 'shortage',  'REAL DEFAULT 0')
+    _add_column_if_missing(conn, 'ledger_entries', 'leakage',   'REAL DEFAULT 0')
+    _add_column_if_missing(conn, 'ledger_entries', 'breakage',  'REAL DEFAULT 0')
+    _add_column_if_missing(conn, 'ledger_entries', 'unloading', 'REAL DEFAULT 0')
+    _add_column_if_missing(conn, 'ledger_entries', 'detention', 'REAL DEFAULT 0')
+    _add_column_if_missing(conn, 'ledger_entries', 'toll_tax',  'REAL DEFAULT 0')
+    _add_column_if_missing(conn, 'ledger_entries', 'excess_km', 'REAL DEFAULT 0')
 
     # Phase G — GST-compliant invoicing
     # `total_amount` stays the GRAND total (incl. tax) for backward compatibility.
@@ -1042,11 +1056,18 @@ def _client_charges(conn, name):
 
 def _transporter_charges_net(conn, transporter_id):
     """For a transporter: gross freight earned MINUS advances already paid at trip time
-       (cash, account, diesel). Result is what would be owed if we hadn't made any
-       direct settlement payments yet."""
+       (cash, account, diesel) and POD-time settlement penalties (shortage, leakage,
+       breakage, unloading), PLUS POD-time reimbursements (detention, toll tax,
+       excess km). Result is what would be owed if we hadn't made any direct
+       settlement payments yet. Must match _ledger_balance()'s formula exactly —
+       that function computes the same thing per-row for on-screen display."""
     r = conn.execute('''
         SELECT COALESCE(SUM(freight - COALESCE(advance_cash,0) - COALESCE(advance_account,0)
-                            - COALESCE(diesel,0)), 0)
+                            - COALESCE(diesel,0)
+                            - COALESCE(shortage,0) - COALESCE(leakage,0)
+                            - COALESCE(breakage,0) - COALESCE(unloading,0)
+                            + COALESCE(detention,0) + COALESCE(toll_tax,0)
+                            + COALESCE(excess_km,0)), 0)
         FROM ledger_entries WHERE transporter_id=?''', (transporter_id,)
     ).fetchone()
     return float(r[0]) if r else 0.0
@@ -1139,17 +1160,15 @@ def get_party_transactions(party_type, party_key, limit=200):
             })
     elif party_type == 'transporter':
         for r in conn.execute(
-            '''SELECT id, gr_no, entry_date, freight, advance_cash, advance_account, diesel
-               FROM ledger_entries WHERE transporter_id=?
+            '''SELECT * FROM ledger_entries WHERE transporter_id=?
                ORDER BY entry_date DESC, id DESC LIMIT ?''',
             (party_key, limit)
         ).fetchall():
-            net = (r['freight'] or 0) - (r['advance_cash'] or 0) \
-                - (r['advance_account'] or 0) - (r['diesel'] or 0)
+            net = _ledger_balance(r)
             if net != 0:
                 items.append({
                     'date': r['entry_date'], 'kind': 'charge',
-                    'label': f'Trip GR-{r["gr_no"] or r["id"]} (net after on-trip advances)',
+                    'label': f'Trip GR-{r["gr_no"] or r["id"]} (net after on-trip advances & settlement adjustments)',
                     'amount': net, 'link': url_for('ledger_view', le_id=r['id']),
                 })
     elif party_type == 'diesel_vendor':
@@ -3282,9 +3301,7 @@ def _load_trip_360(conn, challan_id, le_id):
         r = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
         if r:
             ledger = dict(r)
-            ledger['balance'] = _ledger_balance(
-                ledger['freight'], ledger['advance_cash'],
-                ledger['advance_account'], ledger['diesel'])
+            ledger['balance'] = _ledger_balance(ledger)
             if ledger.get('bill_id'):
                 br = conn.execute('SELECT * FROM bills WHERE id=?', (ledger['bill_id'],)).fetchone()
                 if br:
@@ -4489,8 +4506,18 @@ def diesel_vendor_delete(vid):
 
 # ── Ledger ──
 
-def _ledger_balance(freight, adv_cash, adv_acct, diesel):
-    return float(freight or 0) - float(adv_cash or 0) - float(adv_acct or 0) - float(diesel or 0)
+def _ledger_balance(e):
+    """Net amount owed to the transporter for one trip. Takes a dict/Row (not
+    positional args) so every caller automatically picks up new settlement
+    fields — SELECT le.* / dict(row) always includes them, so there's no way
+    to silently miss one at a call site the way separate positional args
+    could.  See the 'Phase I' schema comment in init_db() for the
+    add/deduct convention on shortage/leakage/breakage/unloading/detention/
+    toll_tax/excess_km."""
+    g = lambda k: float(e[k] or 0) if k in e.keys() else 0.0
+    return (g('freight') - g('advance_cash') - g('advance_account') - g('diesel')
+            - g('shortage') - g('leakage') - g('breakage') - g('unloading')
+            + g('detention') + g('toll_tax') + g('excess_km'))
 
 
 def _is_overdue(entry_date_iso, pod_received, threshold_days):
@@ -4542,7 +4569,7 @@ def ledger_index():
     entries = []
     for r in rows:
         e = dict(r)
-        e['balance']   = _ledger_balance(e['freight'], e['advance_cash'], e['advance_account'], e['diesel'])
+        e['balance']   = _ledger_balance(e)
         e['overdue']   = _is_overdue(e['entry_date'], e['pod_received'], overdue_days)
         entries.append(e)
 
@@ -4648,8 +4675,7 @@ def ledger_view(le_id):
     if not row:
         return 'Ledger entry not found', 404
     entry = dict(row)
-    entry['balance'] = _ledger_balance(entry['freight'], entry['advance_cash'],
-                                       entry['advance_account'], entry['diesel'])
+    entry['balance'] = _ledger_balance(entry)
     return render_template('ledger_form.html',
                            entry=entry,
                            transporters=get_transporters(),
@@ -4657,6 +4683,13 @@ def ledger_view(le_id):
                            vehicles=get_vehicles(),
                            today=datetime.now().strftime('%Y-%m-%d'),
                            audit_entries=get_audit_for('ledger_entry', le_id))
+
+
+# Settlement adjustment fields, entered manually at POD time. Positive
+# numbers only — direction (deduct vs add to freight) is fixed by
+# _ledger_balance()'s formula, not by the sign the user types.
+_POD_ADJUSTMENT_FIELDS = ('shortage', 'leakage', 'breakage', 'unloading',
+                          'detention', 'toll_tax', 'excess_km')
 
 
 @app.route('/ledger/<int:le_id>/pod', methods=['POST'])
@@ -4677,25 +4710,79 @@ def ledger_pod(le_id):
             pod_image_rel = f'pods/{safe_name}'
 
     conn = get_db()
-    before_row = conn.execute('SELECT pod_received, pod_image, gr_no FROM ledger_entries WHERE id=?',
-                              (le_id,)).fetchone()
+    before_row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
     before = dict(before_row) if before_row else {}
+
+    # Quick one-tap "Mark POD" actions from the ledger list (camera-icon /
+    # bulk actions) don't submit these fields at all — only the full POD
+    # modal does. Fall back to the existing DB value when a field is
+    # missing from the submission, so a quick tap never silently zeroes
+    # out an adjustment someone already entered.
+    adjustments = {
+        name: (_safe_num(f.get(name)) if name in f else before.get(name)) or 0
+        for name in _POD_ADJUSTMENT_FIELDS
+    }
+
     if pod_image_rel:
-        conn.execute('UPDATE ledger_entries SET pod_received=?, pod_date=?, pod_image=?, updated_at=? WHERE id=?',
-                     (pod_received, pod_date, pod_image_rel, datetime.now().isoformat(), le_id))
+        conn.execute('''UPDATE ledger_entries SET
+                          pod_received=?, pod_date=?, pod_image=?,
+                          shortage=?, leakage=?, breakage=?, unloading=?,
+                          detention=?, toll_tax=?, excess_km=?,
+                          updated_at=? WHERE id=?''',
+                     (pod_received, pod_date, pod_image_rel,
+                      adjustments['shortage'], adjustments['leakage'],
+                      adjustments['breakage'], adjustments['unloading'],
+                      adjustments['detention'], adjustments['toll_tax'],
+                      adjustments['excess_km'],
+                      datetime.now().isoformat(), le_id))
     else:
-        conn.execute('UPDATE ledger_entries SET pod_received=?, pod_date=?, updated_at=? WHERE id=?',
-                     (pod_received, pod_date, datetime.now().isoformat(), le_id))
+        conn.execute('''UPDATE ledger_entries SET
+                          pod_received=?, pod_date=?,
+                          shortage=?, leakage=?, breakage=?, unloading=?,
+                          detention=?, toll_tax=?, excess_km=?,
+                          updated_at=? WHERE id=?''',
+                     (pod_received, pod_date,
+                      adjustments['shortage'], adjustments['leakage'],
+                      adjustments['breakage'], adjustments['unloading'],
+                      adjustments['detention'], adjustments['toll_tax'],
+                      adjustments['excess_km'],
+                      datetime.now().isoformat(), le_id))
+
     # Audit
+    adj_changes = _diff_dict(before, adjustments, fields=_POD_ADJUSTMENT_FIELDS)
     if before.get('pod_received') != pod_received:
         action = 'POD received' if pod_received else 'POD un-marked'
         if pod_image_rel and pod_received:
             action += ' (with photo)'
         log_audit(conn, 'pod_mark', 'ledger_entry', le_id,
-                  summary=f'{action} for GR-{before.get("gr_no", le_id)} on {pod_date}')
+                  summary=f'{action} for GR-{before.get("gr_no", le_id)} on {pod_date}',
+                  changes=adj_changes or None)
     elif pod_image_rel:
         log_audit(conn, 'pod_mark', 'ledger_entry', le_id,
-                  summary=f'POD photo added for GR-{before.get("gr_no", le_id)}')
+                  summary=f'POD photo added for GR-{before.get("gr_no", le_id)}',
+                  changes=adj_changes or None)
+    elif adj_changes:
+        log_audit(conn, 'pod_mark', 'ledger_entry', le_id,
+                  summary=f'Settlement adjustments updated for GR-{before.get("gr_no", le_id)}',
+                  changes=adj_changes)
+
+    # The payments-ledger mirror (if this trip was already marked paid) must
+    # stay in sync with the adjustments — otherwise the transporter's balance
+    # would silently disagree with what's shown here. Only touches the auto
+    # row if one already exists (i.e. paid was already ticked); does not
+    # itself mark anything paid.
+    if before.get('paid') and before.get('transporter_id'):
+        after_row = dict(before)
+        after_row.update(adjustments)
+        new_net = _ledger_balance(after_row)
+        # Preserve a manually-entered paid_amount if one was set; otherwise
+        # the auto-calculated net follows the adjustment change.
+        amt = before.get('paid_amount') or new_net
+        _auto_payment_upsert(conn, 'transporter', before['transporter_id'], amt,
+                             f'auto-paid:ledger:{le_id}',
+                             when=before.get('paid_date'), mode=before.get('paid_mode'),
+                             created_by=current_user())
+
     conn.commit()
     conn.close()
     flash('POD status updated.')
@@ -4712,8 +4799,7 @@ def ledger_paid(le_id):
     is_paid = 1 if f.get('paid') else 0
     conn = get_db()
     before_row = conn.execute(
-        '''SELECT paid, gr_no, transporter_id, freight, advance_cash, advance_account, diesel
-           FROM ledger_entries WHERE id=?''', (le_id,)).fetchone()
+        'SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
     before = dict(before_row) if before_row else {}
     ref = f'auto-paid:ledger:{le_id}'
     if is_paid:
@@ -4726,8 +4812,7 @@ def ledger_paid(le_id):
                       f.get('paid_reference'),
                       datetime.now().isoformat(), le_id))
         # Mirror the flag into the payments ledger (the balance source of truth).
-        net = (before.get('freight') or 0) - (before.get('advance_cash') or 0) \
-            - (before.get('advance_account') or 0) - (before.get('diesel') or 0)
+        net = _ledger_balance(before)
         amt = _safe_num(f.get('paid_amount')) or net
         if before.get('transporter_id'):
             _auto_payment_upsert(conn, 'transporter', before.get('transporter_id'),
@@ -4827,8 +4912,7 @@ def ledger_bulk_paid():
     # payments row per newly-settled trip — the payments table is the balance
     # source of truth, so the flag alone is no longer enough.
     to_pay = conn.execute(
-        f'''SELECT id, transporter_id, freight, advance_cash, advance_account, diesel
-            FROM ledger_entries
+        f'''SELECT * FROM ledger_entries
             WHERE id IN ({placeholders}) AND COALESCE(paid,0)=0''',
         ids).fetchall()
     conn.execute(
@@ -4840,8 +4924,7 @@ def ledger_bulk_paid():
     for r in to_pay:
         if not r['transporter_id']:
             continue
-        net = (r['freight'] or 0) - (r['advance_cash'] or 0) \
-            - (r['advance_account'] or 0) - (r['diesel'] or 0)
+        net = _ledger_balance(r)
         _auto_payment_upsert(conn, 'transporter', r['transporter_id'], net,
                              f'auto-paid:ledger:{r["id"]}',
                              when=today, mode=mode, created_by=current_user())
@@ -5475,7 +5558,7 @@ def report_transporter_detail(tid):
         c_amt  = e['advance_cash'] or 0
         ac_amt = e['advance_account'] or 0
         d_amt  = e['diesel'] or 0
-        e['balance'] = f_amt - c_amt - ac_amt - d_amt
+        e['balance'] = _ledger_balance(e)
         total_freight += f_amt
         total_cash    += c_amt
         total_account += ac_amt
