@@ -84,13 +84,13 @@
           <tr><th>{{ t('Transporter') }}</th><th>{{ t('Mobile') }}</th><th>{{ t('Balance owed by us') }}</th><th></th></tr>
         </thead>
         <tbody>
-          {% for t in transporters %}
+          {% for tr in transporters %}
           <tr>
-            <td><a href="{{ url_for('party_detail', party_type='transporter', party_key=t.id) }}" class="fw-semibold">{{ t.name }}</a></td>
-            <td>{{ t.mobile or '' }}</td>
-            <td>{{ vendor_balance_pill(t.balance) }}</td>
+            <td><a href="{{ url_for('party_detail', party_type='transporter', party_key=tr.id) }}" class="fw-semibold">{{ tr.name }}</a></td>
+            <td>{{ tr.mobile or '' }}</td>
+            <td>{{ vendor_balance_pill(tr.balance) }}</td>
             <td class="text-end" style="width:140px">
-              <a href="{{ url_for('party_detail', party_type='transporter', party_key=t.id) }}"
+              <a href="{{ url_for('party_detail', party_type='transporter', party_key=tr.id) }}"
                  class="btn btn-sm btn-outline-primary">{{ t('Open ledger →') }}</a>
             </td>
           </tr>
