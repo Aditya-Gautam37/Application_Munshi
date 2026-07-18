@@ -41,13 +41,18 @@
     </div>
   </div>
 
-  {% if challan.status == 'draft' %}
+  {% if challan.status == 'draft' and challan.source_image %}
   <div class="alert alert-warning d-flex align-items-center">
     <i class="bi bi-magic me-2 fs-4"></i>
     <div>
       <strong>AI pre-filled this from the uploaded photo.</strong>
       Verify every field. Yellow-highlighted ones are AI's low-confidence reads.
     </div>
+  </div>
+  {% elif challan.status == 'draft' %}
+  <div class="alert alert-info d-flex align-items-center">
+    <i class="bi bi-pencil-square me-2 fs-4"></i>
+    <div><strong>Manual entry.</strong> Fill in the fields below and save.</div>
   </div>
   {% endif %}
 

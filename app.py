@@ -3996,6 +3996,23 @@ def challans_index():
     return render_template('challans_index.html', challans=[dict(r) for r in rows])
 
 
+@app.route('/challan/new', methods=['POST'])
+def challan_new_manual():
+    """Start a blank challan with no photo/AI step — reuses the same draft
+       review/edit screen (challan_review) that photo extraction lands on,
+       just with every field empty instead of AI-prefilled."""
+    conn = get_db()
+    lr_no_val = find_unique_lr_no(conn)
+    conn.execute('''
+        INSERT INTO challans (lr_no, status, created_at)
+        VALUES (?, 'draft', ?)
+    ''', (lr_no_val, datetime.now().isoformat()))
+    chl_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+    conn.commit()
+    conn.close()
+    return redirect(url_for('challan_review', challan_id=chl_id))
+
+
 @app.route('/challan/extract', methods=['GET', 'POST'])
 def challan_extract_upload():
     if request.method == 'POST':
