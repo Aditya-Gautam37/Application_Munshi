@@ -61,8 +61,16 @@
             <td>{{ t.bank_details or '' }}</td>
             <td>{{ t.notes or '' }}</td>
             <td>
+              {% set warn = 'Remove transporter ' ~ t.name ~ '?' %}
+              {% if t.trip_count > 0 %}
+                {% set warn = warn ~ ' This transporter has ' ~ t.trip_count ~ ' trip' ~ ('s' if t.trip_count != 1 else '') ~ ' on record' %}
+                {% if t.balance and t.balance > 0.005 %}
+                  {% set warn = warn ~ ' and ₹' ~ ('%.2f'|format(t.balance)) ~ ' still outstanding' %}
+                {% endif %}
+                {% set warn = warn ~ '. Deleting is permanent — this history will no longer show up anywhere in the app.' %}
+              {% endif %}
               <form method="post" action="{{ url_for('transporter_delete', tid=t.id) }}"
-                    onsubmit="return confirm('Remove transporter {{ t.name }}?')">
+                    onsubmit="return confirm({{ warn | tojson }})">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
               </form>
@@ -113,8 +121,16 @@
             <td>{{ v.location or '' }}</td>
             <td>{{ v.notes or '' }}</td>
             <td>
+              {% set warn = 'Remove diesel vendor ' ~ v.name ~ '?' %}
+              {% if v.trip_count > 0 %}
+                {% set warn = warn ~ ' This vendor has ' ~ v.trip_count ~ ' fuel entr' ~ ('ies' if v.trip_count != 1 else 'y') ~ ' on record' %}
+                {% if v.balance and v.balance > 0.005 %}
+                  {% set warn = warn ~ ' and ₹' ~ ('%.2f'|format(v.balance)) ~ ' still outstanding' %}
+                {% endif %}
+                {% set warn = warn ~ '. Deleting is permanent — this history will no longer show up anywhere in the app.' %}
+              {% endif %}
               <form method="post" action="{{ url_for('diesel_vendor_delete', vid=v.id) }}"
-                    onsubmit="return confirm('Remove vendor {{ v.name }}?')">
+                    onsubmit="return confirm({{ warn | tojson }})">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
               </form>

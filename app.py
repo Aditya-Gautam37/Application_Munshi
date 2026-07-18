@@ -4263,9 +4263,23 @@ def remember_diesel_vendor(conn, name):
 # ── /masters — combined Transporters + Diesel Vendors page ─────────────────
 @app.route('/masters')
 def masters_index():
+    conn = get_db()
+    transporters = get_transporters()
+    for t in transporters:
+        t['trip_count'] = conn.execute(
+            'SELECT COUNT(*) FROM ledger_entries WHERE transporter_id=?', (t['id'],)
+        ).fetchone()[0]
+        t['balance'] = get_party_balance('transporter', t['id'])
+    diesel_vendors = get_diesel_vendors()
+    for v in diesel_vendors:
+        v['trip_count'] = conn.execute(
+            'SELECT COUNT(*) FROM ledger_entries WHERE diesel_vendor_id=? AND diesel > 0', (v['id'],)
+        ).fetchone()[0]
+        v['balance'] = get_party_balance('diesel_vendor', v['id'])
+    conn.close()
     return render_template('masters.html',
-                           transporters=get_transporters(),
-                           diesel_vendors=get_diesel_vendors())
+                           transporters=transporters,
+                           diesel_vendors=diesel_vendors)
 
 
 @app.route('/masters/transporter/add', methods=['POST'])
