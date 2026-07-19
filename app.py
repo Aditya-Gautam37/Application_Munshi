@@ -934,52 +934,171 @@ def get_rate_list():
     return [dict(r) for r in rows]
 
 
+_RATE_FIELD_LABELS = {
+    'customer_name': 'Customer Name',
+    'party_code': 'Party Code',
+    'location': 'Location',
+    'dist_twy_km': 'Distance TWY (km)',
+    'dist_owy_km': 'Distance OWY (km)',
+    'lp_owy': 'LP OWY (rate)',
+    'lp_twy': 'LP TWY (rate)',
+    'trolla_owy': 'Trolla OWY (rate)',
+    'trolla_twy': 'Trolla TWY (rate)',
+}
+
+
+def _classify_rate_header(text):
+    """Guess which freight_rates field a header cell refers to, by keyword — not by fixed position.
+       This lets 'any type of excel' work as long as its column headers are recognisable,
+       regardless of column order, sheet name, or exact wording."""
+    t = (text or '').strip().upper()
+    if not t:
+        return None
+    any_of = lambda *words: any(w in t for w in words)
+    if 'TROLLA' in t and 'TWY' in t:
+        return 'trolla_twy'
+    if 'TROLLA' in t and 'OWY' in t:
+        return 'trolla_owy'
+    if any_of('DIS', 'KM') and 'TWY' in t:
+        return 'dist_twy_km'
+    if any_of('DIS', 'KM') and 'OWY' in t:
+        return 'dist_owy_km'
+    if 'TWY' in t and any_of('LP', 'RATE'):
+        return 'lp_twy'
+    if 'OWY' in t and any_of('LP', 'RATE'):
+        return 'lp_owy'
+    if 'CODE' in t:
+        return 'party_code'
+    if any_of('LOCATION', 'DESTINATION', 'DEST') or t in ('CITY', 'PLACE', 'TOWN'):
+        return 'location'
+    if any_of('CUSTOMER', 'CLIENT', 'PARTY') or t == 'NAME':
+        return 'customer_name'
+    return None
+
+
+def _rate_cell_str(v):
+    if v is None:
+        return ''
+    return v.strip() if isinstance(v, str) else str(v).strip()
+
+
+def _rate_cell_int(v):
+    if v in (None, ''):
+        return None
+    try:
+        return int(float(v))
+    except (ValueError, TypeError):
+        return None
+
+
+def _rate_cell_float(v):
+    if v in (None, ''):
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
 def import_rate_list_from_xlsx(xlsx_path):
-    """Parse a rate-list workbook matching the Book1.xlsx layout and upsert into freight_rates.
-       Header row with column names is at row 4 (1-based). Data starts at row 5.
-       Columns: A CUSTOMER NAME | B PARTY CODE | C Location | D Dis TWY | E Dis OWY |
-                F LP OWY | G LP TWY | H Trolla OWY | I Trolla TWY
-       Returns (added_or_updated_count, error_string_or_None)."""
+    """Parse a rate-list workbook and upsert into freight_rates.
+       Column headers are recognised by keyword (see _classify_rate_header), not by fixed
+       position — so this works with 'any type of excel file' as long as it has headers like
+       Customer Name / Location / rate & distance columns, in whatever order or sheet.
+       Returns (added_or_updated_count, message_string_or_None)."""
     try:
         from openpyxl import load_workbook
     except ImportError:
         return 0, "openpyxl not installed (pip install openpyxl)"
     try:
         wb = load_workbook(xlsx_path, data_only=True, read_only=True)
-        ws = wb.active
     except Exception as e:
         return 0, f"Could not open workbook: {e}"
+
+    # Scan every sheet's first 15 rows for a header row that has at least a customer-name column.
+    header_row = None
+    col_map = None
+    ws = None
+    for sheet in wb.worksheets:
+        for ri, row in enumerate(sheet.iter_rows(min_row=1, max_row=15, values_only=True), start=1):
+            if not row:
+                continue
+            candidate = {}
+            for ci, cell in enumerate(row):
+                if not isinstance(cell, str):
+                    continue
+                field = _classify_rate_header(cell)
+                if field and field not in candidate:
+                    candidate[field] = ci
+            if 'customer_name' in candidate:
+                ws, header_row, col_map, top_row = sheet, ri, candidate, row
+                break
+        if ws:
+            break
+
+    if ws is None:
+        return 0, ("Could not find a 'Customer Name' (or Party/Client Name) column header in "
+                    "this file — add a header row with recognisable column names.")
+
+    # Some real-world rate lists use a TWO-row merged header: a group label like
+    # "LP-Truck" / "Trolla-Truck" on the header row, with the direction ("OWY"/"TWY")
+    # on the row directly below it — the bare "OWY"/"TWY" cell alone is ambiguous
+    # without its group label above it. Detect that by checking whether the row
+    # below the header is itself a header (its customer-name cell is blank, i.e.
+    # it can't be a real data row) and, if so, combine each unmapped column's text
+    # with the cell above it before re-classifying, then skip that row as data.
+    data_start = header_row + 1
+    sub_row_iter = ws.iter_rows(min_row=header_row + 1, max_row=header_row + 1, values_only=True)
+    sub_row = next(sub_row_iter, None)
+    if sub_row:
+        cust_col = col_map.get('customer_name')
+        sub_cust_val = sub_row[cust_col] if cust_col is not None and cust_col < len(sub_row) else None
+        if not _rate_cell_str(sub_cust_val):
+            # Forward-fill blank header cells with the nearest group label to their
+            # left — this approximates a horizontally-merged cell (e.g. "LP-Truck"
+            # spanning 2 columns leaves the SECOND column's raw value as None).
+            filled_top, last_label = [], ''
+            for v in top_row:
+                if isinstance(v, str) and v.strip():
+                    last_label = v
+                filled_top.append(last_label)
+
+            used_cols = set(col_map.values())
+            for ci, sub_cell in enumerate(sub_row):
+                if ci in used_cols or not isinstance(sub_cell, str):
+                    continue
+                top_cell = filled_top[ci] if ci < len(filled_top) else ''
+                combined = f"{top_cell} {sub_cell}".strip()
+                field = _classify_rate_header(combined) or _classify_rate_header(sub_cell)
+                if field and field not in col_map:
+                    col_map[field] = ci
+                    used_cols.add(ci)
+            data_start = header_row + 2
 
     conn = get_db()
     count = 0
     skipped = 0
-    # Find the header row dynamically — look for a row containing "CUSTOMER NAME"
-    header_row = None
-    for ri, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
-        if row and any(isinstance(c, str) and 'CUSTOMER NAME' in c.upper() for c in row if c):
-            header_row = ri
-            break
-    if header_row is None:
-        conn.close()
-        return 0, "Could not find header row with 'CUSTOMER NAME'"
-
-    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+    for row in ws.iter_rows(min_row=data_start, values_only=True):
         if not row:
             continue
-        # Need at least the customer name (col A) populated
-        name = (row[0] or '').strip() if isinstance(row[0], str) else (str(row[0]).strip() if row[0] is not None else '')
+
+        def cell(field):
+            idx = col_map.get(field)
+            return row[idx] if idx is not None and idx < len(row) else None
+
+        name = _rate_cell_str(cell('customer_name'))
         if not name:
             skipped += 1
             continue
         try:
-            party_code = str(row[1]).strip() if row[1] is not None else ''
-            location   = (row[2] or '').strip() if isinstance(row[2], str) else (str(row[2]).strip() if row[2] is not None else '')
-            dist_twy   = int(row[3]) if row[3] not in (None, '') else None
-            dist_owy   = int(row[4]) if row[4] not in (None, '') else None
-            lp_owy     = float(row[5]) if row[5] not in (None, '') else None
-            lp_twy     = float(row[6]) if row[6] not in (None, '') else None
-            trl_owy    = float(row[7]) if row[7] not in (None, '') else None
-            trl_twy    = float(row[8]) if row[8] not in (None, '') else None
+            party_code = _rate_cell_str(cell('party_code'))
+            location   = _rate_cell_str(cell('location'))
+            dist_twy   = _rate_cell_int(cell('dist_twy_km'))
+            dist_owy   = _rate_cell_int(cell('dist_owy_km'))
+            lp_owy     = _rate_cell_float(cell('lp_owy'))
+            lp_twy     = _rate_cell_float(cell('lp_twy'))
+            trl_owy    = _rate_cell_float(cell('trolla_owy'))
+            trl_twy    = _rate_cell_float(cell('trolla_twy'))
         except (ValueError, TypeError, IndexError):
             skipped += 1
             continue
@@ -1003,7 +1122,15 @@ def import_rate_list_from_xlsx(xlsx_path):
         count += 1
     conn.commit()
     conn.close()
-    msg = None if skipped == 0 else f"(skipped {skipped} blank/invalid rows)"
+
+    found_labels = [_RATE_FIELD_LABELS[f] for f in col_map]
+    missing = [_RATE_FIELD_LABELS[f] for f in _RATE_FIELD_LABELS if f not in col_map]
+    parts = [f"matched columns: {', '.join(found_labels)}"]
+    if missing:
+        parts.append(f"not found (left blank): {', '.join(missing)}")
+    if skipped:
+        parts.append(f"skipped {skipped} blank/invalid rows")
+    msg = '(' + '; '.join(parts) + ')'
     return count, msg
 
 
@@ -1239,7 +1366,7 @@ from munshi.services import auth_service
 
 # Endpoints that don't require auth. 'setup'/'setup_demo' are the first-run
 # wizard, reached before any user exists.
-_PUBLIC_ENDPOINTS = {'login', 'static', 'health', 'setup', 'setup_demo', 'set_lang'}
+_PUBLIC_ENDPOINTS = {'login', 'static', 'health', 'setup', 'setup_demo', 'set_lang', 'service_worker'}
 
 _hash_password = auth_service.hash_password
 _verify_password = auth_service.verify_password
@@ -1295,7 +1422,7 @@ def _require_setup():
        a blank install must land on /setup, NOT /login. Once setup is complete
        this guard is a no-op and never interferes."""
     ep = request.endpoint
-    if ep in ('setup', 'setup_demo', 'static', 'health', 'set_lang'):
+    if ep in ('setup', 'setup_demo', 'static', 'health', 'set_lang', 'service_worker'):
         return None
     if ep is None:
         return None
@@ -1340,6 +1467,19 @@ def set_lang(code):
     if ref and ref.startswith(request.host_url):
         return redirect(ref)
     return redirect(url_for('dashboard'))
+
+
+@app.route('/sw.js')
+def service_worker():
+    """Serve the service worker from the ROOT path (not /static/sw.js) so its
+       default scope is '/' — a service worker's scope can't exceed the
+       directory it's served from unless the browser is told otherwise via
+       the Service-Worker-Allowed header, which we also set here. This is
+       what makes the app installable ('Add to Home Screen') on phones."""
+    resp = send_from_directory(app.static_folder, 'sw.js')
+    resp.headers['Service-Worker-Allowed'] = '/'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
 
 
 # ── License enforcement (Munshi commercial — phone-home + kill-switch) ──────
@@ -1521,7 +1661,7 @@ def inject_drive_state():
 def _maybe_phone_home():
     if not LICENSE_SERVER_URL:
         return None
-    if request.endpoint in ('static', 'extract_status'):
+    if request.endpoint in ('static', 'extract_status', 'service_worker'):
         return None
     state = _get_license_state()
     last = state.get('last_checked_at')
@@ -1549,7 +1689,7 @@ def _maybe_daily_backup():
        Backoff: if the previous Drive sync errored, retry at most every 5
        minutes. Prevents a request burst (e.g. the extraction-polling page)
        from spawning a Drive-upload thread storm when Drive is unreachable."""
-    if request.endpoint in ('static', 'extract_status'):
+    if request.endpoint in ('static', 'extract_status', 'service_worker'):
         return None
     today = datetime.now().strftime('%Y-%m-%d')
     backup_path = os.path.join(BACKUP_DIR, f'bills-{today}.db')

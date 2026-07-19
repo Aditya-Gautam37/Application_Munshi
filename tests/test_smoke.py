@@ -768,3 +768,116 @@ def test_pod_delivery_date_saved_and_not_reset_by_quick_tap(client):
     row = appmod.get_db().execute(
         "SELECT delivery_date FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
     assert row["delivery_date"] == "2026-07-17", "quick re-tap must not reset delivery_date"
+
+
+# ── (I) Freight rate-list Excel import: header-name matching, not fixed columns ─
+#
+# import_rate_list_from_xlsx() used to require the exact Book1.xlsx column
+# order. It now recognises columns by header keyword, in any order/sheet, and
+# upserts on (customer_name, location) so re-uploading updated rates replaces
+# the existing row instead of duplicating it.
+
+def _xlsx_bytes(rows):
+    import io as _io
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+def test_rate_list_import_recognizes_reordered_nonstandard_headers(client, tmp_path):
+    """A rate list whose columns are in a different order, with different
+    wording, and missing some optional columns entirely (not the Book1.xlsx
+    layout at all) must still import correctly by matching header keywords."""
+    _login_ready(client)
+    xlsx = _xlsx_bytes([
+        ["Code", "Party Name", "Destination", "Rate OWY", "Rate TWY"],
+        ["C001", "Test Customer", "Kanpur", 45000, 90000],
+    ])
+    path = tmp_path / "rates.xlsx"
+    path.write_bytes(xlsx)
+    count, msg = appmod.import_rate_list_from_xlsx(str(path))
+    assert count == 1, msg
+    row = appmod.get_db().execute(
+        "SELECT * FROM freight_rates WHERE customer_name='TEST CUSTOMER'").fetchone()
+    assert row is not None
+    assert row["party_code"] == "C001"
+    assert row["location"] == "KANPUR"
+    assert row["lp_owy"] == 45000
+    assert row["lp_twy"] == 90000
+    assert row["dist_owy_km"] is None  # column wasn't present in this file — left blank, no crash
+
+
+def test_rate_list_reupload_updates_existing_row_not_duplicate(client, tmp_path):
+    """The user's core question: edit a rate in Excel, re-upload the whole
+    file, and the existing customer+location row must be UPDATED in place —
+    not duplicated — because of the ON CONFLICT(customer_name, location) upsert."""
+    _login_ready(client)
+    first = tmp_path / "rates1.xlsx"
+    first.write_bytes(_xlsx_bytes([
+        ["Customer Name", "Location", "LP OWY", "LP TWY"],
+        ["ABC Industries", "Mumbai", 45000, 90000],
+    ]))
+    count1, _ = appmod.import_rate_list_from_xlsx(str(first))
+    assert count1 == 1
+
+    second = tmp_path / "rates2.xlsx"
+    second.write_bytes(_xlsx_bytes([
+        ["Customer Name", "Location", "LP OWY", "LP TWY"],
+        ["ABC Industries", "Mumbai", 48000, 95000],  # same customer+location, new rate
+    ]))
+    count2, _ = appmod.import_rate_list_from_xlsx(str(second))
+    assert count2 == 1
+
+    rows = appmod.get_db().execute(
+        "SELECT * FROM freight_rates WHERE customer_name='ABC INDUSTRIES'").fetchall()
+    assert len(rows) == 1, "re-upload must update the existing row, not create a duplicate"
+    assert rows[0]["lp_owy"] == 48000
+    assert rows[0]["lp_twy"] == 95000
+
+
+def test_rate_list_import_handles_two_row_merged_headers(client, tmp_path):
+    """Real-world rate lists often use a merged two-row header: a group label
+    ('LP-Truck' / 'Trolla-Truck' / 'Distence (Sachindi)') on one row, with the
+    bare direction ('OWY'/'TWY') on the row directly below it (the reported
+    bug: only Customer/Code/Location came through, the 6 rate/distance
+    columns were blank because 'OWY'/'TWY' alone don't say which group they
+    belong to without the merged label above them)."""
+    _login_ready(client)
+    xlsx = _xlsx_bytes([
+        ["Customer Name", "Party Code", "Location", "Distence (Sachindi)", None, "LP-Truck", None, "Trolla-Truck", None],
+        [None, None, None, "Dis TWY", "Dis OWY", "OWY", "TWY", "OWY", "TWY"],
+        ["Test Customer", "C001", "Kanpur", 70, 35, 4163, 4163, 5780, 5780],
+    ])
+    path = tmp_path / "merged.xlsx"
+    path.write_bytes(xlsx)
+    count, msg = appmod.import_rate_list_from_xlsx(str(path))
+    assert count == 1, msg
+    row = appmod.get_db().execute(
+        "SELECT * FROM freight_rates WHERE customer_name='TEST CUSTOMER'").fetchone()
+    assert row is not None
+    assert row["dist_twy_km"] == 70
+    assert row["dist_owy_km"] == 35
+    assert row["lp_owy"] == 4163
+    assert row["lp_twy"] == 4163
+    assert row["trolla_owy"] == 5780
+    assert row["trolla_twy"] == 5780
+
+
+def test_rate_list_import_requires_customer_name_column(client, tmp_path):
+    """A file with no recognisable customer-name header must fail clearly,
+    not silently import garbage."""
+    _login_ready(client)
+    path = tmp_path / "bad.xlsx"
+    path.write_bytes(_xlsx_bytes([
+        ["Something", "Else"],
+        ["1", "2"],
+    ]))
+    count, msg = appmod.import_rate_list_from_xlsx(str(path))
+    assert count == 0
+    assert "customer" in msg.lower() or "Customer" in msg
