@@ -37,6 +37,30 @@ app.jinja_env.auto_reload = True
 # edge and forward plain HTTP internally). Needed for _drive_redirect_uri() to
 # build a correct OAuth callback URL when hosted. No-op for the desktop build
 # (MUNSHI_BEHIND_PROXY unset) — werkzeug ships with Flask, no new dependency.
+# Belt-and-suspenders BEFORE ProxyFix (wrapped first here so it ends up
+# innermost — see ordering note below): on some hosts (e.g. Render behind
+# Cloudflare) the X-Forwarded-Proto chain doesn't match ProxyFix's assumed
+# single-hop count, so request.scheme can still end up "http" even though
+# the edge is HTTPS-only. That single wrong bit is fatal here: the session
+# cookie is marked Secure (below, via MUNSHI_HTTPS), so any redirect built
+# from an "http" request.url (e.g. login's next=) sends the browser to an
+# insecure URL, the Secure cookie doesn't ride along, and the app bounces
+# back to /login forever — an infinite redirect loop. MUNSHI_HTTPS=1 means
+# "we are ALWAYS served over HTTPS at the edge" — a fact we know for certain
+# in that deployment, so we force it unconditionally instead of trusting
+# proxy-header hop-counting to get it right. Must be WSGI middleware (not a
+# before_request hook) because Werkzeug reads wsgi.url_scheme once, when it
+# constructs the Request object — before any before_request hook can run.
+if os.environ.get('MUNSHI_HTTPS', '').strip() == '1':
+    _pre_https_wsgi_app = app.wsgi_app
+    def _force_https_scheme(environ, start_response):
+        environ['wsgi.url_scheme'] = 'https'
+        return _pre_https_wsgi_app(environ, start_response)
+    app.wsgi_app = _force_https_scheme
+
+# Wrapped AFTER the https-forcer above, so ProxyFix ends up OUTERMOST (runs
+# first on each request) and this forcer runs right before Flask itself —
+# guaranteeing the final scheme is "https" no matter what ProxyFix computed.
 if os.environ.get('MUNSHI_BEHIND_PROXY', '').strip() == '1':
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
