@@ -1064,45 +1064,54 @@ def import_rate_list_from_xlsx(xlsx_path):
         return 0, ("Could not find a 'Customer Name' (or Party/Client Name) column header in "
                     "this file — add a header row with recognisable column names.")
 
-    # Some real-world rate lists use a TWO-row merged header: a group label like
-    # "LP-Truck" / "Trolla-Truck" on the header row, with the direction ("OWY"/"TWY")
-    # on the row directly below it — the bare "OWY"/"TWY" cell alone is ambiguous
-    # without its group label above it. Detect that by checking whether the row
-    # below the header is itself a header (its customer-name cell is blank, i.e.
-    # it can't be a real data row) and, if so, combine each unmapped column's text
-    # with the cell above it before re-classifying, then skip that row as data.
-    data_start = header_row + 1
-    sub_row_iter = ws.iter_rows(min_row=header_row + 1, max_row=header_row + 1, values_only=True)
-    sub_row = next(sub_row_iter, None)
-    if sub_row:
-        cust_col = col_map.get('customer_name')
-        sub_cust_val = sub_row[cust_col] if cust_col is not None and cust_col < len(sub_row) else None
-        if not _rate_cell_str(sub_cust_val):
-            # Forward-fill blank header cells with the nearest group label to their
-            # left — this approximates a horizontally-merged cell (e.g. "LP-Truck"
-            # spanning 2 columns leaves the SECOND column's raw value as None).
-            filled_top, last_label = [], ''
-            for v in top_row:
-                if isinstance(v, str) and v.strip():
-                    last_label = v
-                filled_top.append(last_label)
+    # Some real-world rate lists split the header across TWO rows: a merged
+    # group label ("LP-Truck" / "Trolla-Truck" / "Distence (Sachindi)") on one
+    # row, with the specific column name ("OWY"/"TWY"/"Dis TWY") on an
+    # ADJACENT row — the bare "OWY"/"TWY" cell alone is ambiguous without its
+    # group label. The group row can be either directly ABOVE the row we
+    # found customer_name/location on (common: group header sits above the
+    # field-name row that also holds "Customer"/"Location") or directly
+    # BELOW it (less common) — check both. Forward-fill blank cells in EACH
+    # row with the nearest label to their left first: a horizontally-merged
+    # group cell (e.g. "LP-Truck" spanning 2 columns) leaves every cell but
+    # the first in that merge as None, and either row could be the one that's
+    # merged depending on which layout this file uses.
+    def _forward_fill(vals):
+        filled, last_label = [], ''
+        for v in vals:
+            if isinstance(v, str) and v.strip():
+                last_label = v
+            filled.append(last_label)
+        return filled
 
-            used_cols = set(col_map.values())
-            for ci, sub_cell in enumerate(sub_row):
-                if ci in used_cols or not isinstance(sub_cell, str):
-                    continue
-                top_cell = filled_top[ci] if ci < len(filled_top) else ''
-                combined = f"{top_cell} {sub_cell}".strip()
-                field = _classify_rate_header(combined) or _classify_rate_header(sub_cell)
-                if field and field not in col_map:
-                    col_map[field] = ci
-                    used_cols.add(ci)
-            data_start = header_row + 2
+    filled_own = _forward_fill(top_row)
+    used_cols = set(col_map.values())
+    for neighbour_ri in (header_row - 1, header_row + 1):
+        if all(f in col_map for f in _RATE_FIELD_LABELS):
+            break
+        if neighbour_ri < 1:
+            continue
+        neighbour_iter = ws.iter_rows(min_row=neighbour_ri, max_row=neighbour_ri, values_only=True)
+        neighbour_row = next(neighbour_iter, None)
+        if not neighbour_row:
+            continue
+        filled_neighbour = _forward_fill(neighbour_row)
+        width = max(len(filled_own), len(filled_neighbour))
+        for ci in range(width):
+            if ci in used_cols:
+                continue
+            own_text = filled_own[ci] if ci < len(filled_own) else ''
+            neighbour_text = filled_neighbour[ci] if ci < len(filled_neighbour) else ''
+            combined = f"{own_text} {neighbour_text}".strip()
+            field = _classify_rate_header(combined)
+            if field and field not in col_map:
+                col_map[field] = ci
+                used_cols.add(ci)
 
     conn = get_db()
     count = 0
     skipped = 0
-    for row in ws.iter_rows(min_row=data_start, values_only=True):
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
         if not row:
             continue
 

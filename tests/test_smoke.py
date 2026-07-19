@@ -869,6 +869,38 @@ def test_rate_list_import_handles_two_row_merged_headers(client, tmp_path):
     assert row["trolla_twy"] == 5780
 
 
+def test_rate_list_import_handles_group_label_above_field_row(client, tmp_path):
+    """The ACTUAL real-world file reported by the user: the group label row
+    ('LP-Truck'/'Trolla-Truck'/'Distence (Sachindi)') sits ABOVE the row that
+    has 'Customer'/'Location'/'OWY'/'TWY' — the opposite direction from the
+    other merged-header test — with two unrelated title/subtitle rows above
+    that ('Rate List of 2024 Sachendi', 'Diesel Rate @ 90 (2023)'). Only
+    Customer/Code/Location/distances came through before this fix; the 4
+    rate columns (bare 'OWY'/'TWY' with no group label on their own row)
+    stayed blank because the importer only ever looked at the row BELOW."""
+    _login_ready(client)
+    xlsx = _xlsx_bytes([
+        [None, None, None, None, None, "Rate List of 2024 Sachendi", None, None, None],
+        [None, None, None, None, None, "Diesel Rate @ 90 (2023)", None, None, None],
+        [None, None, None, "Distence (Sachindi)", None, "LP-Truck", None, "Trolla-Truck", None],
+        ["Customer", "Code", "Location", "Dis TWY", "Dis OWY", "OWY", "TWY", "OWY", "TWY"],
+        ["K-Kanpur Traders", "158192", "K-Kanpur", 70, 35, 4163, 4163, 5780, 5780],
+    ])
+    path = tmp_path / "real_layout.xlsx"
+    path.write_bytes(xlsx)
+    count, msg = appmod.import_rate_list_from_xlsx(str(path))
+    assert count == 1, msg
+    row = appmod.get_db().execute(
+        "SELECT * FROM freight_rates WHERE customer_name='K-KANPUR TRADERS'").fetchone()
+    assert row is not None
+    assert row["dist_twy_km"] == 70
+    assert row["dist_owy_km"] == 35
+    assert row["lp_owy"] == 4163
+    assert row["lp_twy"] == 4163
+    assert row["trolla_owy"] == 5780
+    assert row["trolla_twy"] == 5780
+
+
 def test_rate_list_import_requires_customer_name_column(client, tmp_path):
     """A file with no recognisable customer-name header must fail clearly,
     not silently import garbage."""
