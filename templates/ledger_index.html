@@ -120,11 +120,18 @@
             {% else %}
               <button type="button" class="btn btn-sm {{ 'btn-danger' if e.overdue else 'btn-warning text-dark' }} py-0 px-2"
                       data-bs-toggle="modal" data-bs-target="#podAdjustModal"
-                      data-le-id="{{ e.id }}" data-gr-no="{{ e.gr_no or e.id }}"
-                      data-freight="{{ e.freight or '' }}">
+                      data-le-id="{{ e.id }}" data-gr-no="{{ e.gr_no or e.id }}">
                 {% if e.overdue %}⚠ Mark POD{% else %}Mark POD{% endif %}
               </button>
             {% endif %}
+            <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 ms-1"
+                    data-bs-toggle="modal" data-bs-target="#amountsModal"
+                    data-le-id="{{ e.id }}" data-gr-no="{{ e.gr_no or e.id }}"
+                    data-freight="{{ e.freight or '' }}" data-advance-cash="{{ e.advance_cash or '' }}"
+                    data-advance-account="{{ e.advance_account or '' }}" data-diesel="{{ e.diesel or '' }}"
+                    title="Edit Freight / Advance / Diesel — doesn't touch POD status">
+              <i class="bi bi-cash-coin"></i>
+            </button>
           </td>
           <td data-label="Paid">{{ paid_pill(e.paid, e.paid_mode) }}</td>
           <td class="text-center text-nowrap">
@@ -196,11 +203,6 @@
           <div class="modal-body">
             <div class="row g-2 mb-3">
               <div class="col-md-4">
-                <label class="form-label small">Freight (₹)</label>
-                <input type="number" name="freight" id="podModalFreight" step="any" class="form-control form-control-sm">
-                <small class="text-muted">Pre-filled with the current rate — change it if it needs correcting.</small>
-              </div>
-              <div class="col-md-4">
                 <label class="form-label small">Delivery Date</label>
                 <input type="date" name="delivery_date" id="podModalDeliveryDate" class="form-control form-control-sm">
                 <small class="text-muted">When the goods actually reached the consignee.</small>
@@ -263,6 +265,47 @@
     </div>
   </div>
 
+  {# ── Separate "Edit Amounts" modal — Freight / Advance Cash / Advance A/c /
+        Diesel only. Deliberately independent of Mark POD: editing a number
+        here must never mark the trip as delivered as a side effect. ── #}
+  <div class="modal fade" id="amountsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <form method="post" id="amountsForm">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <div class="modal-header">
+            <h6 class="modal-title"><i class="bi bi-cash-coin me-1"></i>Edit Amounts — GR <span id="amountsModalGrNo"></span></h6>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-2">
+              <div class="col-6">
+                <label class="form-label small">Freight (₹)</label>
+                <input type="number" name="freight" id="amountsModalFreight" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Advance Cash (₹)</label>
+                <input type="number" name="advance_cash" id="amountsModalAdvCash" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Advance A/c (₹)</label>
+                <input type="number" name="advance_account" id="amountsModalAdvAccount" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small">Diesel (₹)</label>
+                <input type="number" name="diesel" id="amountsModalDiesel" step="any" class="form-control form-control-sm">
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check2 me-1"></i>Save Amounts</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function() {
       const modalEl = document.getElementById('podAdjustModal');
@@ -272,13 +315,30 @@
           if (!btn) return;
           const leId = btn.getAttribute('data-le-id');
           const grNo = btn.getAttribute('data-gr-no');
-          const freight = btn.getAttribute('data-freight');
           document.getElementById('podAdjustForm').action = '/ledger/' + leId + '/pod';
           document.getElementById('podModalGrNo').textContent = grNo;
-          document.getElementById('podModalFreight').value = freight || '';
           const todayStr = new Date().toISOString().slice(0, 10);
           document.getElementById('podModalDate').value = todayStr;
           document.getElementById('podModalDeliveryDate').value = todayStr;
+        });
+      }
+    })();
+  </script>
+
+  <script>
+    (function() {
+      const modalEl = document.getElementById('amountsModal');
+      if (modalEl) {
+        modalEl.addEventListener('show.bs.modal', event => {
+          const btn = event.relatedTarget;
+          if (!btn) return;
+          const leId = btn.getAttribute('data-le-id');
+          document.getElementById('amountsForm').action = '/ledger/' + leId + '/amounts';
+          document.getElementById('amountsModalGrNo').textContent = btn.getAttribute('data-gr-no');
+          document.getElementById('amountsModalFreight').value = btn.getAttribute('data-freight') || '';
+          document.getElementById('amountsModalAdvCash').value = btn.getAttribute('data-advance-cash') || '';
+          document.getElementById('amountsModalAdvAccount').value = btn.getAttribute('data-advance-account') || '';
+          document.getElementById('amountsModalDiesel').value = btn.getAttribute('data-diesel') || '';
         });
       }
     })();

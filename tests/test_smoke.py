@@ -991,56 +991,89 @@ def test_bootstrap_from_seed_skips_seed_copy_when_drive_restore_succeeds(tmp_pat
         "blank seed must not have overwritten the Drive-restored database"
 
 
-# ── (K) Freight editable from the Mark POD popup ────────────────────────────
+# ── (K) Freight/advances editable via a separate "Edit Amounts" popup ──────
 #
-# Reported: at POD time there was no way to correct the freight rate without
-# leaving the ledger list for the full trip-edit page. ledger_pod() now
-# accepts a 'freight' field, pre-filled by the modal with the current rate
-# (so a normal submit is a pass-through), falling back to the existing value
-# — never silently zeroing it — on quick one-tap actions that don't submit
-# the field at all.
+# Reported: editing freight at POD time meant the only path was the Mark POD
+# popup, which also marks the trip as delivered as a side effect - not
+# appropriate for just correcting a number before delivery. Money fields
+# (freight, advance_cash, advance_account, diesel) now live in their own
+# /ledger/<id>/amounts endpoint, entirely separate from ledger_pod(), which
+# no longer touches freight at all.
 
-def test_pod_modal_can_correct_freight(client):
+def test_ledger_pod_no_longer_touches_freight(client):
+    """ledger_pod() must ignore any 'freight' field entirely now - editing
+    it moved to its own endpoint."""
     _login_ready(client)
-    tid = _create_transporter(client, "Freight Correct Test Transport")
+    tid = _create_transporter(client, "POD No Freight Test Transport")
     le_id = _create_ledger_entry(tid, freight=10000)
     token = _csrf(client)
     client.post(f"/ledger/{le_id}/pod", data={
         "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
-        "freight": "12500",
+        "freight": "999999",
     }, content_type="multipart/form-data", follow_redirects=False)
     row = appmod.get_db().execute(
         "SELECT freight FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+    assert row["freight"] == 10000, "ledger_pod() must not change freight anymore"
+
+
+def test_ledger_amounts_updates_freight_and_advances(client):
+    _login_ready(client)
+    tid = _create_transporter(client, "Amounts Update Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000, advance_cash=1000, advance_account=500, diesel=2000)
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/amounts", data={
+        "csrf_token": token, "freight": "12500", "advance_cash": "1500",
+        "advance_account": "500", "diesel": "2000",
+    }, follow_redirects=False)
+    row = appmod.get_db().execute(
+        "SELECT freight, advance_cash, advance_account, diesel FROM ledger_entries WHERE id=?",
+        (le_id,)).fetchone()
     assert row["freight"] == 12500
-    assert appmod.get_party_balance("transporter", tid) == 12500
+    assert row["advance_cash"] == 1500
+    # 12500 freight - 1500 adv cash - 500 adv a/c - 2000 diesel = 8500
+    assert appmod.get_party_balance("transporter", tid) == 8500
 
 
-def test_pod_quick_tap_does_not_touch_freight(client):
-    """The quick one-tap 'Mark POD' actions (camera icon, bulk action) don't
-    submit a freight field at all — must not zero it out."""
+def test_ledger_amounts_blank_field_keeps_existing_value(client):
+    """A blank/unparseable field falls back to the existing value instead of
+    zeroing it out — the popup pre-fills every field, so this only matters
+    if a field gets cleared unintentionally."""
     _login_ready(client)
-    tid = _create_transporter(client, "Freight Quick Tap Test Transport")
-    le_id = _create_ledger_entry(tid, freight=15000)
+    tid = _create_transporter(client, "Amounts Blank Test Transport")
+    le_id = _create_ledger_entry(tid, freight=8000, advance_cash=500)
     token = _csrf(client)
-    client.post(f"/ledger/{le_id}/pod", data={
-        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
-    }, content_type="multipart/form-data", follow_redirects=False)
+    client.post(f"/ledger/{le_id}/amounts", data={
+        "csrf_token": token, "freight": "", "advance_cash": "700",
+    }, follow_redirects=False)
     row = appmod.get_db().execute(
-        "SELECT freight FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
-    assert row["freight"] == 15000, "quick POD tap must not change freight"
-
-
-def test_pod_blank_freight_field_keeps_existing_value(client):
-    """If the freight field is submitted but left blank/unparseable, keep
-    the existing value instead of zeroing out the trip's freight."""
-    _login_ready(client)
-    tid = _create_transporter(client, "Freight Blank Test Transport")
-    le_id = _create_ledger_entry(tid, freight=8000)
-    token = _csrf(client)
-    client.post(f"/ledger/{le_id}/pod", data={
-        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
-        "freight": "",
-    }, content_type="multipart/form-data", follow_redirects=False)
-    row = appmod.get_db().execute(
-        "SELECT freight FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+        "SELECT freight, advance_cash FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
     assert row["freight"] == 8000, "blank freight submission must not zero it out"
+    assert row["advance_cash"] == 700
+
+
+def test_ledger_amounts_syncs_already_paid_trip(client):
+    """Same as ledger_pod()'s payment-mirror sync: the auto-payment mirror
+    always records whatever the CURRENT net charge is, so a fully-paid
+    trip's outstanding balance stays 0 even after the freight is corrected
+    (the recorded rupee amount moves; the debt does not silently reappear).
+    Confirm the mirror actually re-synced (not just coincidentally still 0)
+    by checking the underlying auto-payment row's amount directly."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Amounts Paid Sync Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000)
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/paid", data={
+        "csrf_token": token, "paid": "1", "paid_date": "2026-07-19", "paid_mode": "Cash",
+    }, follow_redirects=False)
+    assert appmod.get_party_balance("transporter", tid) == 0
+
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/amounts", data={
+        "csrf_token": token, "freight": "13000",
+    }, follow_redirects=False)
+    assert appmod.get_party_balance("transporter", tid) == 0, \
+        "a fully-paid trip must stay fully paid after correcting freight"
+    auto_row = appmod.get_db().execute(
+        "SELECT amount FROM payments WHERE reference=?", (f'auto-paid:ledger:{le_id}',)).fetchone()
+    assert auto_row["amount"] == 13000, \
+        "the auto-payment mirror must follow the corrected freight, not stay at the old amount"

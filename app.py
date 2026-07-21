@@ -5036,22 +5036,13 @@ def ledger_pod(le_id):
     }
     delivery_date = f.get('delivery_date') if 'delivery_date' in f else before.get('delivery_date')
 
-    # Freight: unlike the adjustments above (which default to 0), the modal
-    # pre-fills this with the trip's current rate so it's normally just a
-    # pass-through. A genuinely blank/unparseable submission falls back to
-    # the existing value rather than zeroing out the trip's freight — quick
-    # one-tap POD actions don't submit this field at all, and even the full
-    # modal shouldn't be able to silently wipe it via an empty field.
-    freight_submitted = _safe_num(f.get('freight')) if 'freight' in f else None
-    freight = freight_submitted if freight_submitted is not None else (before.get('freight') or 0)
-
     if pod_image_rel:
         conn.execute('''UPDATE ledger_entries SET
-                          pod_received=?, pod_date=?, pod_image=?, delivery_date=?, freight=?,
+                          pod_received=?, pod_date=?, pod_image=?, delivery_date=?,
                           shortage=?, leakage=?, breakage=?, unloading=?,
                           detention=?, toll_tax=?, excess_km=?,
                           updated_at=? WHERE id=?''',
-                     (pod_received, pod_date, pod_image_rel, delivery_date, freight,
+                     (pod_received, pod_date, pod_image_rel, delivery_date,
                       adjustments['shortage'], adjustments['leakage'],
                       adjustments['breakage'], adjustments['unloading'],
                       adjustments['detention'], adjustments['toll_tax'],
@@ -5059,11 +5050,11 @@ def ledger_pod(le_id):
                       datetime.now().isoformat(), le_id))
     else:
         conn.execute('''UPDATE ledger_entries SET
-                          pod_received=?, pod_date=?, delivery_date=?, freight=?,
+                          pod_received=?, pod_date=?, delivery_date=?,
                           shortage=?, leakage=?, breakage=?, unloading=?,
                           detention=?, toll_tax=?, excess_km=?,
                           updated_at=? WHERE id=?''',
-                     (pod_received, pod_date, delivery_date, freight,
+                     (pod_received, pod_date, delivery_date,
                       adjustments['shortage'], adjustments['leakage'],
                       adjustments['breakage'], adjustments['unloading'],
                       adjustments['detention'], adjustments['toll_tax'],
@@ -5071,8 +5062,8 @@ def ledger_pod(le_id):
                       datetime.now().isoformat(), le_id))
 
     # Audit
-    adj_changes = _diff_dict(before, {**adjustments, 'delivery_date': delivery_date, 'freight': freight},
-                             fields=list(_POD_ADJUSTMENT_FIELDS) + ['delivery_date', 'freight'])
+    adj_changes = _diff_dict(before, {**adjustments, 'delivery_date': delivery_date},
+                             fields=list(_POD_ADJUSTMENT_FIELDS) + ['delivery_date'])
     if before.get('pod_received') != pod_received:
         action = 'POD received' if pod_received else 'POD un-marked'
         if pod_image_rel and pod_received:
@@ -5097,7 +5088,6 @@ def ledger_pod(le_id):
     if before.get('paid') and before.get('transporter_id'):
         after_row = dict(before)
         after_row.update(adjustments)
-        after_row['freight'] = freight
         new_net = _ledger_balance(after_row)
         # Preserve a manually-entered paid_amount if one was set; otherwise
         # the auto-calculated net follows the adjustment change.
@@ -5111,6 +5101,62 @@ def ledger_pod(le_id):
     conn.close()
     flash('POD status updated.')
     # If the click came from the list page, return there. Else stay on the entry detail.
+    ref = request.referrer or ''
+    if '/ledger' in ref and not f'/ledger/{le_id}' in ref:
+        return redirect(url_for('ledger_index'))
+    return redirect(url_for('ledger_view', le_id=le_id))
+
+
+# Money fields editable via the "Edit Amounts" popup — deliberately separate
+# from ledger_pod() so correcting a number never marks a trip as delivered
+# as a side effect.
+_LEDGER_AMOUNT_FIELDS = ('freight', 'advance_cash', 'advance_account', 'diesel')
+
+
+@app.route('/ledger/<int:le_id>/amounts', methods=['POST'])
+def ledger_amounts(le_id):
+    f = request.form
+    conn = get_db()
+    before_row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
+    if not before_row:
+        conn.close()
+        return 'Ledger entry not found', 404
+    before = dict(before_row)
+
+    # A blank/unparseable field falls back to the existing value rather than
+    # zeroing it out — the popup pre-fills every field, so a normal submit
+    # is a pass-through; only a genuinely-entered number should change money.
+    amounts = {}
+    for name in _LEDGER_AMOUNT_FIELDS:
+        submitted = _safe_num(f.get(name)) if name in f else None
+        amounts[name] = submitted if submitted is not None else (before.get(name) or 0)
+
+    conn.execute('''UPDATE ledger_entries SET
+                      freight=?, advance_cash=?, advance_account=?, diesel=?, updated_at=?
+                    WHERE id=?''',
+                 (amounts['freight'], amounts['advance_cash'], amounts['advance_account'],
+                  amounts['diesel'], datetime.now().isoformat(), le_id))
+
+    changes = _diff_dict(before, amounts, fields=list(_LEDGER_AMOUNT_FIELDS))
+    if changes:
+        log_audit(conn, 'update', 'ledger_entry', le_id,
+                  summary=f'Amounts updated for GR-{before.get("gr_no", le_id)}',
+                  changes=changes)
+
+    # Keep the payments-ledger mirror in sync, same as ledger_pod().
+    if before.get('paid') and before.get('transporter_id'):
+        after_row = dict(before)
+        after_row.update(amounts)
+        new_net = _ledger_balance(after_row)
+        amt = before.get('paid_amount') or new_net
+        _auto_payment_upsert(conn, 'transporter', before['transporter_id'], amt,
+                             f'auto-paid:ledger:{le_id}',
+                             when=before.get('paid_date'), mode=before.get('paid_mode'),
+                             created_by=current_user())
+
+    conn.commit()
+    conn.close()
+    flash('Amounts updated.')
     ref = request.referrer or ''
     if '/ledger' in ref and not f'/ledger/{le_id}' in ref:
         return redirect(url_for('ledger_index'))
