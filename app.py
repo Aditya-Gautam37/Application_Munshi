@@ -169,6 +169,9 @@ def _bootstrap_from_seed_if_missing():
     if os.path.exists(DB_PATH):
         return  # already initialised on a previous run
 
+    if _restore_latest_backup_from_drive():
+        return  # restored a real backup — skip the blank seed entirely
+
     # Prefer the blank seed. Look in two places for each: alongside the script
     # (dev runs) or inside the PyInstaller _MEIPASS bundle (production runs).
     seed_names = ['seed_blank.db', 'seed.db']
@@ -2135,6 +2138,96 @@ def _drive_is_connected():
        still valid (or refreshable)."""
     state = _get_drive_state()
     return bool(state.get('refresh_token'))
+
+
+# ── Drive restore-on-boot (free-tier hosted persistence) ────────────────────
+# Some hosts (e.g. Render's free web-service tier) wipe the container's disk
+# on every redeploy/restart, taking bills.db with it. A real persistent disk
+# or a managed database fixes this properly but costs money; this is the free
+# alternative for a single-tenant deployment: on a fresh container with no
+# bills.db, restore the most recent Drive backup instead of starting blank.
+#
+# The catch: the normal Drive connection (refresh_token) lives INSIDE
+# bills.db — exactly the file that's missing at this point. So this uses a
+# SEPARATE bootstrap token from an env var (MUNSHI_DRIVE_BOOTSTRAP_REFRESH_TOKEN),
+# which — unlike the database — survives a redeploy because Render env vars
+# aren't part of the wiped disk. The admin copies this token once from
+# Settings after connecting Drive normally (see drive_bootstrap_token()
+# below) and pastes it into Render's dashboard.
+#
+# Best-effort only: any failure here (no token configured, network error,
+# revoked access, empty folder) silently falls through to the normal blank
+# first-run wizard — this must never be able to crash startup.
+def _restore_latest_backup_from_drive():
+    token = os.environ.get('MUNSHI_DRIVE_BOOTSTRAP_REFRESH_TOKEN', '').strip()
+    if not token or not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET:
+        return False
+
+    tmp_path = DB_PATH + '.drive_restore_tmp'
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request as GAuthRequest
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaIoBaseDownload
+        import io as _io
+        import sqlite3 as _sql
+
+        creds = Credentials(
+            token=None,
+            refresh_token=token,
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=GOOGLE_OAUTH_CLIENT_ID,
+            client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+            scopes=DRIVE_SCOPES,
+        )
+        creds.refresh(GAuthRequest())
+        svc = build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+        # No folder_id available yet (that's in the DB too) — find it by name.
+        # Safe under the narrow drive.file scope: this app can only see
+        # files/folders it created itself, so this can't leak other Drive
+        # contents even though it searches by name rather than by ID.
+        folder_q = (f"mimeType='application/vnd.google-apps.folder' and "
+                    f"name='{DRIVE_BACKUP_FOLDER_NAME}' and trashed=false")
+        folders = svc.files().list(q=folder_q, fields='files(id,name)', pageSize=1).execute().get('files', [])
+        if not folders:
+            print('[startup] Drive restore: no backup folder found yet, starting blank', flush=True)
+            return False
+        folder_id = folders[0]['id']
+
+        files_q = f"'{folder_id}' in parents and trashed=false and name contains 'bills-'"
+        files = svc.files().list(
+            q=files_q, fields='files(id,name,modifiedTime)',
+            orderBy='modifiedTime desc', pageSize=1,
+        ).execute().get('files', [])
+        if not files:
+            print('[startup] Drive restore: backup folder is empty, starting blank', flush=True)
+            return False
+
+        latest = files[0]
+        request = svc.files().get_media(fileId=latest['id'])
+        buf = _io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        with open(tmp_path, 'wb') as f:
+            f.write(buf.getvalue())
+        # Sanity-check it's really a SQLite file before trusting it as bills.db.
+        conn = _sql.connect(tmp_path)
+        conn.execute('SELECT COUNT(*) FROM sqlite_master')
+        conn.close()
+        os.replace(tmp_path, DB_PATH)
+        print(f"[startup] Restored bills.db from Drive backup: {latest['name']}", flush=True)
+        return True
+    except Exception as e:
+        print(f'[startup] Drive restore failed (non-fatal, starting blank instead): {e}', flush=True)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
 
 
 # ── Drive routes ────────────────────────────────────────────────────────────

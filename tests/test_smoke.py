@@ -913,3 +913,79 @@ def test_rate_list_import_requires_customer_name_column(client, tmp_path):
     count, msg = appmod.import_rate_list_from_xlsx(str(path))
     assert count == 0
     assert "customer" in msg.lower() or "Customer" in msg
+
+
+# ── (J) Drive restore-on-boot (free-tier hosted persistence) ───────────────
+#
+# On hosts that wipe the disk on redeploy (e.g. Render free tier), a fresh
+# container has no bills.db. _restore_latest_backup_from_drive() tries to
+# pull the latest Drive backup down before the normal blank-seed bootstrap
+# runs. This must NEVER be able to block/crash startup — these tests lock in
+# the safe-fallback behavior for the common cases (not configured, API
+# failure) and confirm the wiring correctly skips the blank seed when a
+# restore succeeds.
+
+def test_drive_restore_noop_when_bootstrap_token_not_set(monkeypatch):
+    """The overwhelmingly common case (free-hosting restore not configured,
+    or a normal desktop install): must return False immediately without
+    attempting any network call."""
+    monkeypatch.delenv("MUNSHI_DRIVE_BOOTSTRAP_REFRESH_TOKEN", raising=False)
+    assert appmod._restore_latest_backup_from_drive() is False
+
+
+def test_drive_restore_noop_when_oauth_not_configured(monkeypatch):
+    """Token set but no OAuth client configured server-side (drive_configured
+    is False) — still must safely no-op, not attempt a call that will fail."""
+    monkeypatch.setenv("MUNSHI_DRIVE_BOOTSTRAP_REFRESH_TOKEN", "fake-token")
+    monkeypatch.setattr(appmod, "GOOGLE_OAUTH_CLIENT_ID", "")
+    monkeypatch.setattr(appmod, "GOOGLE_OAUTH_CLIENT_SECRET", "")
+    assert appmod._restore_latest_backup_from_drive() is False
+
+
+def test_drive_restore_swallows_api_errors(monkeypatch):
+    """Token configured but the Google API call blows up (revoked token,
+    network error, etc.) — must be swallowed, never raised, so a bad/stale
+    bootstrap token can't take down startup."""
+    monkeypatch.setenv("MUNSHI_DRIVE_BOOTSTRAP_REFRESH_TOKEN", "fake-token")
+    monkeypatch.setattr(appmod, "GOOGLE_OAUTH_CLIENT_ID", "fake-id")
+    monkeypatch.setattr(appmod, "GOOGLE_OAUTH_CLIENT_SECRET", "fake-secret")
+
+    class _ExplodingCredentials:
+        def __init__(self, *a, **kw):
+            pass
+
+        def refresh(self, *a, **kw):
+            raise RuntimeError("simulated: invalid_grant")
+
+    import google.oauth2.credentials
+    monkeypatch.setattr(google.oauth2.credentials, "Credentials", _ExplodingCredentials)
+
+    # Must not raise.
+    assert appmod._restore_latest_backup_from_drive() is False
+
+
+def test_bootstrap_from_seed_skips_seed_copy_when_drive_restore_succeeds(tmp_path, monkeypatch):
+    """Wiring check: if _restore_latest_backup_from_drive() reports success
+    (a real backup was restored), _bootstrap_from_seed_if_missing() must NOT
+    also overwrite it with the blank seed."""
+    fresh_db = tmp_path / "fresh_bills.db"
+    appmod.DB_PATH = str(fresh_db)
+    assert not fresh_db.exists()
+
+    def _fake_restore():
+        # Simulate a successful Drive restore by writing a real sqlite file.
+        conn = appmod.sqlite3.connect(str(fresh_db))
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO settings VALUES ('restored_from_drive', '1')")
+        conn.commit()
+        conn.close()
+        return True
+
+    monkeypatch.setattr(appmod, "_restore_latest_backup_from_drive", _fake_restore)
+    appmod._bootstrap_from_seed_if_missing()
+
+    conn = appmod.sqlite3.connect(str(fresh_db))
+    row = conn.execute("SELECT value FROM settings WHERE key='restored_from_drive'").fetchone()
+    conn.close()
+    assert row is not None and row[0] == '1', \
+        "blank seed must not have overwritten the Drive-restored database"

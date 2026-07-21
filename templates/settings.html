@@ -282,6 +282,32 @@
           </button>
         </form>
 
+        {% if is_admin %}
+        <details class="mt-3">
+          <summary class="small text-muted" style="cursor:pointer">
+            Advanced: keep data across redeploys on free hosting (Render free tier, etc.)
+          </summary>
+          <div class="mt-2 p-3 border rounded small">
+            <p class="mb-2">
+              Free hosts often wipe the server's disk on every redeploy — this token lets Munshi
+              automatically restore your latest Drive backup instead of starting blank when that
+              happens. Copy it once into an environment variable named
+              <code>MUNSHI_DRIVE_BOOTSTRAP_REFRESH_TOKEN</code> on your host (e.g. Render →
+              your service → Environment). Treat it like a password — anyone with it can read
+              (only) the Munshi Backups folder in this Drive account.
+            </p>
+            <div class="input-group input-group-sm">
+              <input type="text" class="form-control font-monospace" readonly
+                     id="driveBootstrapToken" value="{{ drive_state.refresh_token }}">
+              <button class="btn btn-outline-secondary" type="button"
+                      onclick="navigator.clipboard.writeText(document.getElementById('driveBootstrapToken').value); this.textContent='Copied!'; setTimeout(() => this.textContent='Copy', 1500)">
+                Copy
+              </button>
+            </div>
+          </div>
+        </details>
+        {% endif %}
+
       {% else %}
         {# Not yet connected #}
         <p class="text-muted small mb-3">
