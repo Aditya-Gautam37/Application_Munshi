@@ -1440,6 +1440,23 @@ def inject_csrf_token():
     return {'csrf_token': lambda: session.get('csrf_token', '')}
 
 
+@app.after_request
+def _no_store_dynamic_pages(resp):
+    """Force every non-static response to be uncacheable by any shared cache
+       (CDN/proxy — Render sits behind Cloudflare) or the browser itself.
+       Without this, a CDN can legally cache a fully-rendered, personalized
+       HTML page (someone's real dashboard/bills/ledger data baked into the
+       response body) and serve that EXACT cached copy to the next visitor
+       who requests the same URL — even before they've logged in themselves.
+       That's a real, serious cross-user data leak class, not a hypothetical
+       one. Static assets (served via the 'static' endpoint, or /sw.js /
+       /manifest.json which set their own appropriate caching) are excluded."""
+    if request.endpoint not in ('static', 'service_worker'):
+        resp.headers['Cache-Control'] = 'no-store, private, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+    return resp
+
+
 @app.before_request
 def _seed_csrf_token():
     """Ensure every session has a CSRF token, even before login — GET /login
