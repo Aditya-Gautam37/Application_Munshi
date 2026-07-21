@@ -4455,60 +4455,32 @@ def challan_extract_upload():
         confidence = {}
         challan_rel = challan_raw = None
         invoice_rel = invoice_raw = None
-        challan_path = invoice_path = None
 
         if has_challan:
-            challan_path, challan_rel, err = _save_challan_upload(challan_upload)
+            full_path, challan_rel, err = _save_challan_upload(challan_upload)
             if err:
                 flash(err)
                 return redirect(url_for('challan_extract_upload'))
-        if has_invoice:
-            invoice_path, invoice_rel, err = _save_challan_upload(invoice_upload)
-            if err:
-                flash(err)
+            result = extract_challan_image(full_path)
+            if not result['ok']:
+                flash(f'Challan extraction failed: {result["error"]}')
                 return redirect(url_for('challan_extract_upload'))
-
-        # Run both Gemini calls at the same time instead of back-to-back —
-        # each call can independently take 30-50s under load (retries +
-        # backoff), and running them sequentially just adds the two
-        # together, which is what was making a combined challan+invoice
-        # upload take up to ~100s.
-        challan_result = invoice_result = None
-        if challan_path and invoice_path:
-            challan_result_box, invoice_result_box = {}, {}
-
-            def _run_challan():
-                challan_result_box['r'] = extract_challan_image(challan_path)
-
-            def _run_invoice():
-                invoice_result_box['r'] = extract_invoice_image(invoice_path)
-
-            t1 = threading.Thread(target=_run_challan)
-            t2 = threading.Thread(target=_run_invoice)
-            t1.start(); t2.start()
-            t1.join(); t2.join()
-            challan_result = challan_result_box['r']
-            invoice_result = invoice_result_box['r']
-        elif challan_path:
-            challan_result = extract_challan_image(challan_path)
-        elif invoice_path:
-            invoice_result = extract_invoice_image(invoice_path)
-
-        if has_challan:
-            if not challan_result['ok']:
-                flash(f'Challan extraction failed: {challan_result["error"]}')
-                return redirect(url_for('challan_extract_upload'))
-            challan_raw = challan_result['raw']
-            cd = challan_result['data']
+            challan_raw = result['raw']
+            cd = result['data']
             confidence.update(cd.get('confidence_per_field', {}))
             d.update(cd)   # challan fields (LR/consignor/consignee/truck/driver/...) form the base
 
         if has_invoice:
-            if not invoice_result['ok']:
-                flash(f'Invoice extraction failed: {invoice_result["error"]}')
+            full_path, invoice_rel, err = _save_challan_upload(invoice_upload)
+            if err:
+                flash(err)
                 return redirect(url_for('challan_extract_upload'))
-            invoice_raw = invoice_result['raw']
-            idata = invoice_result['data']
+            result = extract_invoice_image(full_path)
+            if not result['ok']:
+                flash(f'Invoice extraction failed: {result["error"]}')
+                return redirect(url_for('challan_extract_upload'))
+            invoice_raw = result['raw']
+            idata = result['data']
             confidence.update(idata.get('confidence_per_field', {}))
             # Invoice-specific fields always come from the invoice photo when
             # one was provided — it's the more authoritative source for these,
