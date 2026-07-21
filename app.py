@@ -4210,16 +4210,33 @@ Return ONLY a JSON object matching this schema (no prose, no markdown fences):
 Rules:
 - HANDWRITING is expected — read every visible written character.
 - If a field is blank/empty on the paper, return "" or 0 / null appropriately.
-- ADDRESS FIELDS (consignor_address, consignee_address): do NOT stop after the first word or
-  the town name alone. Read every line written under the name — house/shop number, street,
-  landmark, area, AND pin code if present — and join them into one string (comma-separated).
-  A short single-word answer like just a town name is almost always INCOMPLETE if there is more
-  handwriting below or beside it on the paper — look again before settling on a short answer.
+- ADDRESS FIELDS (consignor_address, consignee_address, from_city_state, to_city_state): do NOT
+  stop after the first word or the town name alone IF more is genuinely written below or beside
+  it — read every line under the name and join them into one string (comma-separated).
+  BUT if the field genuinely only has a short answer written (e.g. just "KANPUR" with nothing
+  else on that line or the lines below/around it), that short answer IS the complete, correct
+  value — output exactly that. NEVER invent, infer, or pad out an address with a house number,
+  street, landmark, district, or pin code that is not actually visible as ink on THIS page, even
+  if it seems like a plausible completion. This document stands alone — do not borrow or recall
+  any detail about this consignor/consignee from anywhere other than what's written on this
+  specific photo, even if the company name seems familiar to you.
+- from_city_state / to_city_state: transcribe EXACTLY the handwritten value in that specific
+  printed field on the form. Do not substitute a city/district from the consignor or consignee
+  address fields, even if they seem related — these are separate fields and can legitimately
+  say different things.
 - Truck numbers: uppercase, no spaces. "UP 71 T 8680" → "UP71T8680".
 - Driver mobile: 10 digits only, strip any spaces or dashes.
 - Dates: convert to YYYY-MM-DD strictly.
 - Confidence: only include fields where you're "low" or "medium" confidence (omit if high).
 - LR No. is sometimes printed in the original book and sometimes overwritten — read what's visible.
+- lr_no vs del_no are DIFFERENT numbers even though both are numeric — lr_no is specifically the
+  value next to "LR No." (usually top-right, near the form title). del_no is specifically the
+  value next to "Del. No." (in the goods/articles table). Do not copy one into the other just
+  because they look similar or one is blank — if you can only find one of the two on the page,
+  leave the other "" rather than guessing it's the same number.
+- challan_date vs invoice_date are DIFFERENT dates that both appear on this same document —
+  challan_date is next to the plain "Date:" label, invoice_date is next to "Date of Invoice:".
+  Read each from its own labeled field; do not copy one into the other.
 """
 
 
@@ -4253,7 +4270,10 @@ Rules:
 - If a field is blank/absent on the invoice, return "" or 0 / null appropriately.
 - ADDRESS FIELDS: join every printed line into one comma-separated string. A short
   single-word/single-city answer is almost always incomplete if more text is printed
-  below or beside it — look again before settling on a short answer.
+  below or beside it — look again before settling on a short answer. BUT never invent,
+  infer, or recall address detail (street, district, pin code) that is not actually
+  printed on THIS document, even if the company name seems familiar — transcribe only
+  what's on the page.
 - Dates: convert to YYYY-MM-DD strictly.
 - Confidence: only include fields where you're "low" or "medium" confidence (omit if high).
 - Prefer the invoice's own printed total/taxable value for value_of_goods over a grand total
@@ -4435,32 +4455,60 @@ def challan_extract_upload():
         confidence = {}
         challan_rel = challan_raw = None
         invoice_rel = invoice_raw = None
+        challan_path = invoice_path = None
 
         if has_challan:
-            full_path, challan_rel, err = _save_challan_upload(challan_upload)
+            challan_path, challan_rel, err = _save_challan_upload(challan_upload)
             if err:
                 flash(err)
                 return redirect(url_for('challan_extract_upload'))
-            result = extract_challan_image(full_path)
-            if not result['ok']:
-                flash(f'Challan extraction failed: {result["error"]}')
+        if has_invoice:
+            invoice_path, invoice_rel, err = _save_challan_upload(invoice_upload)
+            if err:
+                flash(err)
                 return redirect(url_for('challan_extract_upload'))
-            challan_raw = result['raw']
-            cd = result['data']
+
+        # Run both Gemini calls at the same time instead of back-to-back —
+        # each call can independently take 30-50s under load (retries +
+        # backoff), and running them sequentially just adds the two
+        # together, which is what was making a combined challan+invoice
+        # upload take up to ~100s.
+        challan_result = invoice_result = None
+        if challan_path and invoice_path:
+            challan_result_box, invoice_result_box = {}, {}
+
+            def _run_challan():
+                challan_result_box['r'] = extract_challan_image(challan_path)
+
+            def _run_invoice():
+                invoice_result_box['r'] = extract_invoice_image(invoice_path)
+
+            t1 = threading.Thread(target=_run_challan)
+            t2 = threading.Thread(target=_run_invoice)
+            t1.start(); t2.start()
+            t1.join(); t2.join()
+            challan_result = challan_result_box['r']
+            invoice_result = invoice_result_box['r']
+        elif challan_path:
+            challan_result = extract_challan_image(challan_path)
+        elif invoice_path:
+            invoice_result = extract_invoice_image(invoice_path)
+
+        if has_challan:
+            if not challan_result['ok']:
+                flash(f'Challan extraction failed: {challan_result["error"]}')
+                return redirect(url_for('challan_extract_upload'))
+            challan_raw = challan_result['raw']
+            cd = challan_result['data']
             confidence.update(cd.get('confidence_per_field', {}))
             d.update(cd)   # challan fields (LR/consignor/consignee/truck/driver/...) form the base
 
         if has_invoice:
-            full_path, invoice_rel, err = _save_challan_upload(invoice_upload)
-            if err:
-                flash(err)
+            if not invoice_result['ok']:
+                flash(f'Invoice extraction failed: {invoice_result["error"]}')
                 return redirect(url_for('challan_extract_upload'))
-            result = extract_invoice_image(full_path)
-            if not result['ok']:
-                flash(f'Invoice extraction failed: {result["error"]}')
-                return redirect(url_for('challan_extract_upload'))
-            invoice_raw = result['raw']
-            idata = result['data']
+            invoice_raw = invoice_result['raw']
+            idata = invoice_result['data']
             confidence.update(idata.get('confidence_per_field', {}))
             # Invoice-specific fields always come from the invoice photo when
             # one was provided — it's the more authoritative source for these,
