@@ -3,7 +3,18 @@
 {% block content %}
 
 <!-- Screen actions bar -->
-<div class="no-print px-4 py-2 d-flex flex-wrap gap-2 align-items-center border-bottom mb-3">
+<div class="no-print px-4 py-3 d-flex flex-wrap gap-2 align-items-center bg-white border-bottom shadow-sm mb-0 sticky-top">
+  <span class="fw-bold me-1">{{ bill.bill_no }}</span>
+  {% if bill.client_paid %}
+    <span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">
+      <i class="bi bi-check-circle-fill me-1"></i>Paid
+    </span>
+  {% else %}
+    <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">
+      <i class="bi bi-hourglass-split me-1"></i>Unpaid
+    </span>
+  {% endif %}
+  <div class="vr mx-1 d-none d-md-block"></div>
   <button onclick="window.print()" class="btn btn-primary btn-sm">
     <i class="bi bi-printer me-1"></i>Print / Save PDF
   </button>
@@ -34,8 +45,8 @@
   <!-- Client payment status -->
   <div class="ms-auto d-flex align-items-center gap-2">
     {% if bill.client_paid %}
-      <span class="badge bg-success">
-        ✓ Client paid {{ bill.client_paid_date | date if bill.client_paid_date else '' }}
+      <span class="text-muted small">
+        {{ bill.client_paid_date | date if bill.client_paid_date else '' }}
         {% if bill.client_paid_mode %} · {{ bill.client_paid_mode }}{% endif %}
       </span>
       <form method="post" action="{{ url_for('bill_client_paid', bill_id=bill.id) }}"
@@ -91,7 +102,10 @@
 
 <!-- ═══════════════════════════════════════════════════════════════
      PRINT-READY BILL  (A4 Landscape)
+     The .bill-page-wrap/zoom below is SCREEN-ONLY presentation (see
+     style.css) — print output is completely untouched, still exact A4.
 ═══════════════════════════════════════════════════════════════ -->
+<div class="bill-page-wrap">
 <div class="bill-page" id="printBill">
 
   <!-- Title -->
@@ -343,6 +357,7 @@
   </table>
 
 </div><!-- end bill-page -->
+</div><!-- end bill-page-wrap -->
 
 <div class="container-fluid no-print px-4">
   {% include '_activity_log.html' %}

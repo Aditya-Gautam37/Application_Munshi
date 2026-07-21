@@ -265,6 +265,24 @@ body { font-family: Arial, sans-serif; font-size: 14px; background: #f5f5f5; }
 .summary-signatory { display: inline-block; text-align: center; font-size: 8px; font-weight: bold; }
 .sig-line { border-top: 1px solid #000; margin-bottom: 2px; width: 120px; }
 
+/* ── Screen-only presentation polish ───────────────────────────────
+   The bill-page above is deliberately sized/fonted for exact A4-landscape
+   print output (a legal GST document — don't touch that). But viewing it
+   on a monitor at those same print-tiny sizes is hard to read, so scale
+   it up for screen only; @media print below is completely untouched. */
+@media screen {
+  .bill-page-wrap {
+    background: #e9ecf2;
+    padding: 28px 16px 64px;
+    overflow-x: auto;
+  }
+  .bill-page {
+    zoom: 1.4;
+    box-shadow: 0 8px 28px rgba(20, 25, 40, 0.14);
+    border-color: #333;
+  }
+}
+
 /* ── Print overrides ────────────────────────────────────────────── */
 @media print {
   @page {
@@ -277,7 +295,10 @@ body { font-family: Arial, sans-serif; font-size: 14px; background: #f5f5f5; }
   .navbar   { display: none !important; }
   .container-fluid.py-3 { display: none !important; }
 
+  .bill-page-wrap { background: none; padding: 0; overflow: visible; }
   .bill-page {
+    zoom: 1;
+    box-shadow: none;
     width: 100%;
     margin: 0;
     border: 1.5px solid #000;
