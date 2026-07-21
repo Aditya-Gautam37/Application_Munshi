@@ -81,10 +81,38 @@
           <td data-label="Shipment">{{ e.shipment_no or '' }}</td>
           <td data-label="Trip"><span class="badge bg-secondary">{{ e.trip_type or 'OW' }}</span></td>
           <td class="text-end" data-label="MT">{{ '{:,.2f}'.format(e.mt_qty) if e.mt_qty else '' }}</td>
-          <td class="text-end" data-label="Freight">{{ '{:,.0f}'.format(e.freight) if e.freight else '' }}</td>
-          <td class="text-end" data-label="Adv. Cash">{{ '{:,.0f}'.format(e.advance_cash) if e.advance_cash else '' }}</td>
-          <td class="text-end" data-label="Adv. A/c">{{ '{:,.0f}'.format(e.advance_account) if e.advance_account else '' }}</td>
-          <td class="text-end" data-label="Diesel">{{ '{:,.0f}'.format(e.diesel) if e.diesel else '' }}</td>
+          <td data-label="Freight">
+            <form method="post" action="{{ url_for('ledger_amounts', le_id=e.id) }}" class="d-inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="number" name="freight" step="any" class="form-control form-control-sm text-end inline-amount-input"
+                     value="{{ e.freight or '' }}"
+                     onblur="if (this.value !== this.defaultValue) this.form.submit()">
+            </form>
+          </td>
+          <td data-label="Adv. Cash">
+            <form method="post" action="{{ url_for('ledger_amounts', le_id=e.id) }}" class="d-inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="number" name="advance_cash" step="any" class="form-control form-control-sm text-end inline-amount-input"
+                     value="{{ e.advance_cash or '' }}"
+                     onblur="if (this.value !== this.defaultValue) this.form.submit()">
+            </form>
+          </td>
+          <td data-label="Adv. A/c">
+            <form method="post" action="{{ url_for('ledger_amounts', le_id=e.id) }}" class="d-inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="number" name="advance_account" step="any" class="form-control form-control-sm text-end inline-amount-input"
+                     value="{{ e.advance_account or '' }}"
+                     onblur="if (this.value !== this.defaultValue) this.form.submit()">
+            </form>
+          </td>
+          <td data-label="Diesel">
+            <form method="post" action="{{ url_for('ledger_amounts', le_id=e.id) }}" class="d-inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <input type="number" name="diesel" step="any" class="form-control form-control-sm text-end inline-amount-input"
+                     value="{{ e.diesel or '' }}"
+                     onblur="if (this.value !== this.defaultValue) this.form.submit()">
+            </form>
+          </td>
           <td class="text-end fw-bold" data-label="Balance">{{ '{:,.0f}'.format(e.balance) if e.balance else '0' }}</td>
           <td data-label="POD">
             {% if e.pod_received %}
@@ -124,14 +152,6 @@
                 {% if e.overdue %}⚠ Mark POD{% else %}Mark POD{% endif %}
               </button>
             {% endif %}
-            <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2 ms-1"
-                    data-bs-toggle="modal" data-bs-target="#amountsModal"
-                    data-le-id="{{ e.id }}" data-gr-no="{{ e.gr_no or e.id }}"
-                    data-freight="{{ e.freight or '' }}" data-advance-cash="{{ e.advance_cash or '' }}"
-                    data-advance-account="{{ e.advance_account or '' }}" data-diesel="{{ e.diesel or '' }}"
-                    title="Edit Freight / Advance / Diesel — doesn't touch POD status">
-              <i class="bi bi-cash-coin"></i>
-            </button>
           </td>
           <td data-label="Paid">{{ paid_pill(e.paid, e.paid_mode) }}</td>
           <td class="text-center text-nowrap">
@@ -265,47 +285,6 @@
     </div>
   </div>
 
-  {# ── Separate "Edit Amounts" modal — Freight / Advance Cash / Advance A/c /
-        Diesel only. Deliberately independent of Mark POD: editing a number
-        here must never mark the trip as delivered as a side effect. ── #}
-  <div class="modal fade" id="amountsModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog">
-      <div class="modal-content">
-        <form method="post" id="amountsForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <div class="modal-header">
-            <h6 class="modal-title"><i class="bi bi-cash-coin me-1"></i>Edit Amounts — GR <span id="amountsModalGrNo"></span></h6>
-            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-          </div>
-          <div class="modal-body">
-            <div class="row g-2">
-              <div class="col-6">
-                <label class="form-label small">Freight (₹)</label>
-                <input type="number" name="freight" id="amountsModalFreight" step="any" class="form-control form-control-sm">
-              </div>
-              <div class="col-6">
-                <label class="form-label small">Advance Cash (₹)</label>
-                <input type="number" name="advance_cash" id="amountsModalAdvCash" step="any" class="form-control form-control-sm">
-              </div>
-              <div class="col-6">
-                <label class="form-label small">Advance A/c (₹)</label>
-                <input type="number" name="advance_account" id="amountsModalAdvAccount" step="any" class="form-control form-control-sm">
-              </div>
-              <div class="col-6">
-                <label class="form-label small">Diesel (₹)</label>
-                <input type="number" name="diesel" id="amountsModalDiesel" step="any" class="form-control form-control-sm">
-              </div>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-            <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check2 me-1"></i>Save Amounts</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </div>
-
   <script>
     (function() {
       const modalEl = document.getElementById('podAdjustModal');
@@ -320,25 +299,6 @@
           const todayStr = new Date().toISOString().slice(0, 10);
           document.getElementById('podModalDate').value = todayStr;
           document.getElementById('podModalDeliveryDate').value = todayStr;
-        });
-      }
-    })();
-  </script>
-
-  <script>
-    (function() {
-      const modalEl = document.getElementById('amountsModal');
-      if (modalEl) {
-        modalEl.addEventListener('show.bs.modal', event => {
-          const btn = event.relatedTarget;
-          if (!btn) return;
-          const leId = btn.getAttribute('data-le-id');
-          document.getElementById('amountsForm').action = '/ledger/' + leId + '/amounts';
-          document.getElementById('amountsModalGrNo').textContent = btn.getAttribute('data-gr-no');
-          document.getElementById('amountsModalFreight').value = btn.getAttribute('data-freight') || '';
-          document.getElementById('amountsModalAdvCash').value = btn.getAttribute('data-advance-cash') || '';
-          document.getElementById('amountsModalAdvAccount').value = btn.getAttribute('data-advance-account') || '';
-          document.getElementById('amountsModalDiesel').value = btn.getAttribute('data-diesel') || '';
         });
       }
     })();
