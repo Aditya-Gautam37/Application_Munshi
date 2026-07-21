@@ -4381,6 +4381,11 @@ def challans_index():
            FROM challans ORDER BY id DESC LIMIT 200'''
     ).fetchall()
     conn.close()
+    if not rows:
+        # Nothing to list yet — the empty-state page's only real action was
+        # "upload your first challan" anyway, so skip straight to that
+        # screen instead of making it a second click to get there.
+        return redirect(url_for('challan_extract_upload'))
     return render_template('challans_index.html', challans=[dict(r) for r in rows])
 
 
