@@ -90,11 +90,12 @@
           </div>
           <div class="col-md-3">
             <label class="form-label">Client Name (for tax footer)</label>
-            <select name="client_name" class="form-select">
-              {% for c in clients %}
-              <option value="{{ c }}" {{ 'selected' if (bill and bill.client_name == c) or (not edit and c == client_name) else '' }}>{{ c }}</option>
-              {% endfor %}
-            </select>
+            <input type="text" name="client_name" class="form-control" placeholder="Type or pick…"
+                   value="{{ bill.client_name if bill else client_name }}"
+                   list="clientNamesList" autocomplete="off">
+            <datalist id="clientNamesList">
+              {% for c in clients %}<option value="{{ c }}">{% endfor %}
+            </datalist>
           </div>
         </div>
       </div>
