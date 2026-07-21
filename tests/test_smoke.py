@@ -989,3 +989,58 @@ def test_bootstrap_from_seed_skips_seed_copy_when_drive_restore_succeeds(tmp_pat
     conn.close()
     assert row is not None and row[0] == '1', \
         "blank seed must not have overwritten the Drive-restored database"
+
+
+# ── (K) Freight editable from the Mark POD popup ────────────────────────────
+#
+# Reported: at POD time there was no way to correct the freight rate without
+# leaving the ledger list for the full trip-edit page. ledger_pod() now
+# accepts a 'freight' field, pre-filled by the modal with the current rate
+# (so a normal submit is a pass-through), falling back to the existing value
+# — never silently zeroing it — on quick one-tap actions that don't submit
+# the field at all.
+
+def test_pod_modal_can_correct_freight(client):
+    _login_ready(client)
+    tid = _create_transporter(client, "Freight Correct Test Transport")
+    le_id = _create_ledger_entry(tid, freight=10000)
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "freight": "12500",
+    }, content_type="multipart/form-data", follow_redirects=False)
+    row = appmod.get_db().execute(
+        "SELECT freight FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+    assert row["freight"] == 12500
+    assert appmod.get_party_balance("transporter", tid) == 12500
+
+
+def test_pod_quick_tap_does_not_touch_freight(client):
+    """The quick one-tap 'Mark POD' actions (camera icon, bulk action) don't
+    submit a freight field at all — must not zero it out."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Freight Quick Tap Test Transport")
+    le_id = _create_ledger_entry(tid, freight=15000)
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+    }, content_type="multipart/form-data", follow_redirects=False)
+    row = appmod.get_db().execute(
+        "SELECT freight FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+    assert row["freight"] == 15000, "quick POD tap must not change freight"
+
+
+def test_pod_blank_freight_field_keeps_existing_value(client):
+    """If the freight field is submitted but left blank/unparseable, keep
+    the existing value instead of zeroing out the trip's freight."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Freight Blank Test Transport")
+    le_id = _create_ledger_entry(tid, freight=8000)
+    token = _csrf(client)
+    client.post(f"/ledger/{le_id}/pod", data={
+        "csrf_token": token, "pod_received": "1", "pod_date": "2026-07-19",
+        "freight": "",
+    }, content_type="multipart/form-data", follow_redirects=False)
+    row = appmod.get_db().execute(
+        "SELECT freight FROM ledger_entries WHERE id=?", (le_id,)).fetchone()
+    assert row["freight"] == 8000, "blank freight submission must not zero it out"

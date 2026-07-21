@@ -5016,13 +5016,22 @@ def ledger_pod(le_id):
     }
     delivery_date = f.get('delivery_date') if 'delivery_date' in f else before.get('delivery_date')
 
+    # Freight: unlike the adjustments above (which default to 0), the modal
+    # pre-fills this with the trip's current rate so it's normally just a
+    # pass-through. A genuinely blank/unparseable submission falls back to
+    # the existing value rather than zeroing out the trip's freight — quick
+    # one-tap POD actions don't submit this field at all, and even the full
+    # modal shouldn't be able to silently wipe it via an empty field.
+    freight_submitted = _safe_num(f.get('freight')) if 'freight' in f else None
+    freight = freight_submitted if freight_submitted is not None else (before.get('freight') or 0)
+
     if pod_image_rel:
         conn.execute('''UPDATE ledger_entries SET
-                          pod_received=?, pod_date=?, pod_image=?, delivery_date=?,
+                          pod_received=?, pod_date=?, pod_image=?, delivery_date=?, freight=?,
                           shortage=?, leakage=?, breakage=?, unloading=?,
                           detention=?, toll_tax=?, excess_km=?,
                           updated_at=? WHERE id=?''',
-                     (pod_received, pod_date, pod_image_rel, delivery_date,
+                     (pod_received, pod_date, pod_image_rel, delivery_date, freight,
                       adjustments['shortage'], adjustments['leakage'],
                       adjustments['breakage'], adjustments['unloading'],
                       adjustments['detention'], adjustments['toll_tax'],
@@ -5030,11 +5039,11 @@ def ledger_pod(le_id):
                       datetime.now().isoformat(), le_id))
     else:
         conn.execute('''UPDATE ledger_entries SET
-                          pod_received=?, pod_date=?, delivery_date=?,
+                          pod_received=?, pod_date=?, delivery_date=?, freight=?,
                           shortage=?, leakage=?, breakage=?, unloading=?,
                           detention=?, toll_tax=?, excess_km=?,
                           updated_at=? WHERE id=?''',
-                     (pod_received, pod_date, delivery_date,
+                     (pod_received, pod_date, delivery_date, freight,
                       adjustments['shortage'], adjustments['leakage'],
                       adjustments['breakage'], adjustments['unloading'],
                       adjustments['detention'], adjustments['toll_tax'],
@@ -5042,8 +5051,8 @@ def ledger_pod(le_id):
                       datetime.now().isoformat(), le_id))
 
     # Audit
-    adj_changes = _diff_dict(before, {**adjustments, 'delivery_date': delivery_date},
-                             fields=list(_POD_ADJUSTMENT_FIELDS) + ['delivery_date'])
+    adj_changes = _diff_dict(before, {**adjustments, 'delivery_date': delivery_date, 'freight': freight},
+                             fields=list(_POD_ADJUSTMENT_FIELDS) + ['delivery_date', 'freight'])
     if before.get('pod_received') != pod_received:
         action = 'POD received' if pod_received else 'POD un-marked'
         if pod_image_rel and pod_received:
@@ -5068,6 +5077,7 @@ def ledger_pod(le_id):
     if before.get('paid') and before.get('transporter_id'):
         after_row = dict(before)
         after_row.update(adjustments)
+        after_row['freight'] = freight
         new_net = _ledger_balance(after_row)
         # Preserve a manually-entered paid_amount if one was set; otherwise
         # the auto-calculated net follows the adjustment change.
