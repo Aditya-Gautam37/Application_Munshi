@@ -1077,3 +1077,68 @@ def test_ledger_amounts_syncs_already_paid_trip(client):
         "SELECT amount FROM payments WHERE reference=?", (f'auto-paid:ledger:{le_id}',)).fetchone()
     assert auto_row["amount"] == 13000, \
         "the auto-payment mirror must follow the corrected freight, not stay at the old amount"
+
+
+# ── (L) Duplicate-GR warning ────────────────────────────────────────────────
+#
+# gr_no has no uniqueness constraint (some businesses legitimately reuse GR
+# books across years), so nothing blocks creating a second ledger entry with
+# the same GR as an existing one — most commonly by not realizing a challan
+# already auto-created one. /ledger/check-gr (used by the form's live blur
+# check) and a flash warning on save both surface this without blocking it.
+
+def test_ledger_check_gr_finds_existing_entry(client):
+    _login_ready(client)
+    tid = _create_transporter(client, "Dupe Check Test Transport")
+    le_id = _create_ledger_entry(tid, freight=5000)
+    conn = appmod.get_db()
+    conn.execute("UPDATE ledger_entries SET gr_no='GR-DUPE-1' WHERE id=?", (le_id,))
+    conn.commit()
+    conn.close()
+
+    r = client.get('/ledger/check-gr?gr_no=GR-DUPE-1')
+    data = r.get_json()
+    assert len(data['duplicates']) == 1
+    assert data['duplicates'][0]['id'] == le_id
+
+
+def test_ledger_check_gr_excludes_own_id(client):
+    """Editing an entry and checking its OWN gr_no must not warn against
+    itself — exclude_id is how the form avoids self-triggering."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Dupe Exclude Test Transport")
+    le_id = _create_ledger_entry(tid, freight=5000)
+    conn = appmod.get_db()
+    conn.execute("UPDATE ledger_entries SET gr_no='GR-DUPE-2' WHERE id=?", (le_id,))
+    conn.commit()
+    conn.close()
+
+    r = client.get(f'/ledger/check-gr?gr_no=GR-DUPE-2&exclude_id={le_id}')
+    data = r.get_json()
+    assert data['duplicates'] == []
+
+
+def test_ledger_new_flashes_warning_on_duplicate_gr(client):
+    """Creating a second ledger entry with a GR No. that already exists
+    must succeed (not blocked) but flash a clear warning."""
+    _login_ready(client)
+    tid = _create_transporter(client, "Dupe Flash Test Transport")
+    _create_ledger_entry(tid, freight=5000)
+    conn = appmod.get_db()
+    conn.execute("UPDATE ledger_entries SET gr_no='GR-DUPE-3' WHERE transporter_id=?", (tid,))
+    conn.commit()
+    conn.close()
+
+    token = _csrf(client)
+    resp = client.post('/ledger/new', data={
+        'csrf_token': token, 'entry_date': '2026-07-22', 'gr_no': 'GR-DUPE-3',
+        'vehicle_no': 'UP78DUPE2', 'freight': '6000',
+    }, follow_redirects=True)
+    assert resp.status_code == 200
+    body = resp.data.decode()
+    assert 'already exists on another entry' in body, \
+        "creating a duplicate-GR entry must flash a warning, not fail silently"
+    # And it must NOT have been blocked — both rows should exist.
+    count = appmod.get_db().execute(
+        "SELECT COUNT(*) FROM ledger_entries WHERE gr_no='GR-DUPE-3'").fetchone()[0]
+    assert count == 2, "the warning must not block the save"

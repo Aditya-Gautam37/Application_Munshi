@@ -4891,6 +4891,35 @@ def ledger_index():
                            overdue_days=overdue_days)
 
 
+def _find_duplicate_gr(conn, gr_no, exclude_id=None):
+    """Other ledger entries already using this GR No. — deliberately NOT a
+       unique constraint (some businesses legitimately reuse GR books across
+       years), just a heads-up. The most common real trigger: a challan
+       already auto-created a draft ledger entry for this GR, and someone
+       then manually creates a second entry not realizing the first exists —
+       silently splitting one trip's freight/advances across two rows."""
+    gr_no = (gr_no or '').strip()
+    if not gr_no:
+        return []
+    q = 'SELECT id, entry_date, vehicle_no, freight FROM ledger_entries WHERE gr_no=?'
+    params = [gr_no]
+    if exclude_id:
+        q += ' AND id!=?'
+        params.append(exclude_id)
+    return [dict(r) for r in conn.execute(q, params).fetchall()]
+
+
+@app.route('/ledger/check-gr')
+def ledger_check_gr():
+    """Live duplicate-GR check for the New/Edit Entry form (called on blur)."""
+    gr_no = request.args.get('gr_no', '')
+    exclude_id = request.args.get('exclude_id', type=int)
+    conn = get_db()
+    dupes = _find_duplicate_gr(conn, gr_no, exclude_id)
+    conn.close()
+    return jsonify({'duplicates': dupes})
+
+
 @app.route('/ledger/new', methods=['GET', 'POST'])
 def ledger_new():
     if request.method == 'POST':
@@ -4925,9 +4954,15 @@ def _ledger_save_new():
     ))
     new_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
     remember_vehicle(conn, (f.get('vehicle_no') or '').strip().upper())
+    dupes = _find_duplicate_gr(conn, f.get('gr_no'), exclude_id=new_id)
     conn.commit()
     conn.close()
     flash(f'Ledger entry GR-{f.get("gr_no") or new_id} saved.')
+    if dupes:
+        other = dupes[0]
+        flash(f'⚠ Heads up: GR-{(f.get("gr_no") or "").strip()} already exists on another entry '
+              f'(#{other["id"]}, {other["entry_date"] or "no date"}, {other["vehicle_no"] or ""}) — '
+              f'check you haven\'t created a duplicate of the same trip.')
     return redirect(url_for('ledger_view', le_id=new_id))
 
 
@@ -4972,9 +5007,17 @@ def ledger_view(le_id):
             log_audit(conn, 'update', 'ledger_entry', le_id,
                       summary=f'Edited GR-{after["gr_no"]} ({len(changes)} field{"s" if len(changes)!=1 else ""})',
                       changes=changes)
+        dupes = []
+        if after['gr_no'] != before.get('gr_no'):
+            dupes = _find_duplicate_gr(conn, after['gr_no'], exclude_id=le_id)
         conn.commit()
         conn.close()
         flash('Ledger entry updated.')
+        if dupes:
+            other = dupes[0]
+            flash(f'⚠ Heads up: GR-{after["gr_no"]} already exists on another entry '
+                  f'(#{other["id"]}, {other["entry_date"] or "no date"}, {other["vehicle_no"] or ""}) — '
+                  f'check you haven\'t created a duplicate of the same trip.')
         return redirect(url_for('ledger_view', le_id=le_id))
 
     row = conn.execute(

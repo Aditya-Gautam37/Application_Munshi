@@ -47,8 +47,13 @@
           </div>
           <div class="col-md-2">
             <label class="form-label small">GR No. *</label>
-            <input type="text" name="gr_no" class="form-control form-control-sm" required
+            <input type="text" name="gr_no" id="grNoInput" class="form-control form-control-sm" required
                    value="{{ entry.gr_no or '' }}">
+          </div>
+
+          {# ── Duplicate-GR warning banner (populated by JS after GR No. blur) ── #}
+          <div class="col-12" id="grDupeBox" style="display:none">
+            <div class="alert alert-warning py-2 px-3 mb-0 small" id="grDupeText"></div>
           </div>
           <div class="col-md-2">
             <label class="form-label small">Vehicle No. *</label>
@@ -405,6 +410,38 @@ document.addEventListener('DOMContentLoaded', recalcBalance);
     hide();
   });
   dismissBtn.addEventListener('click', hide);
+})();
+
+// ── Duplicate-GR warning: when GR No. blurs, check if another entry already
+// uses it (most common cause: a challan already auto-created this GR's
+// ledger row, and this form is about to create a second one for the same
+// trip). Not blocking — just a heads-up before you save. ──
+(function() {
+  const inp = document.getElementById('grNoInput');
+  const box = document.getElementById('grDupeBox');
+  const txt = document.getElementById('grDupeText');
+  if (!inp || !box) return;
+  const excludeId = {{ (entry.id if entry else '') | tojson }};
+
+  inp.addEventListener('blur', async () => {
+    const v = (inp.value || '').trim();
+    if (!v) { box.style.display = 'none'; return; }
+    try {
+      const url = '/ledger/check-gr?gr_no=' + encodeURIComponent(v)
+                + (excludeId ? '&exclude_id=' + excludeId : '');
+      const r = await fetch(url);
+      const data = await r.json();
+      if (data.duplicates && data.duplicates.length) {
+        const o = data.duplicates[0];
+        txt.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>GR-${v} already exists on another ` +
+          `entry (#${o.id}, ${o.entry_date || 'no date'}, ${o.vehicle_no || ''}) — check you're not ` +
+          `creating a duplicate of the same trip.`;
+        box.style.display = '';
+      } else {
+        box.style.display = 'none';
+      }
+    } catch (e) { box.style.display = 'none'; }
+  });
 })();
 </script>
 {% endblock %}
