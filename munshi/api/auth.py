@@ -65,12 +65,21 @@ def setup_demo():
     return redirect(url_for('login'))
 
 
-def login():
+def _login_next_url():
     raw_next = request.args.get('next') or request.form.get('next') or ''
     # Only allow relative in-site redirects (block open-redirect phishing):
     # a next URL must start with a single '/', not '//' (protocol-relative)
     # and not an absolute URL like https://evil.com.
-    next_url = raw_next if (raw_next.startswith('/') and not raw_next.startswith('//')) else url_for('dashboard')
+    return raw_next if (raw_next.startswith('/') and not raw_next.startswith('//')) else url_for('dashboard')
+
+
+def login():
+    """Generic sign-in, open to any active account regardless of role.
+       Kept unchanged (endpoint name and behavior) since internal redirects —
+       session-expiry, _require_login, etc. — all point here and don't know
+       the visiting user's role in advance. For a role-scoped link to hand
+       out separately, see admin_login()/operator_login() below."""
+    next_url = _login_next_url()
 
     if request.method == 'POST':
         form = LoginForm.from_request(request.form, request.args)
@@ -96,6 +105,53 @@ def login():
         flash(t('Invalid username or password.'))
 
     return render_template('login.html', next_url=next_url)
+
+
+def _portal_login(required_role, portal_title, switch_label, switch_endpoint):
+    """Shared body for the role-scoped portal links (admin_login/operator_login):
+       same credential check as the generic login(), but the account's role
+       must match the portal or sign-in is refused — a correct admin password
+       typed into the operator link doesn't get an admin session there."""
+    next_url = _login_next_url()
+
+    if request.method == 'POST':
+        form = LoginForm.from_request(request.form, request.args)
+        status, payload = auth_service.attempt_login(form.username, form.password)
+
+        if status == 'locked':
+            mins = max(1, payload // 60)
+            flash(f'Too many wrong attempts. Please wait about {mins} minute(s) before trying again.')
+            return render_template('login.html', next_url=next_url, portal_title=portal_title,
+                                    switch_label=switch_label, switch_endpoint=switch_endpoint)
+
+        if status == 'ok':
+            row = payload
+            if (row.role or 'operator') != required_role:
+                flash(t('That account is not set up for this portal. Please use the correct sign-in link for your role.'))
+                return render_template('login.html', next_url=next_url, portal_title=portal_title,
+                                        switch_label=switch_label, switch_endpoint=switch_endpoint)
+            _lang = session.get('lang')
+            session.clear()
+            if _lang:
+                session['lang'] = _lang
+            session['user'] = row.username
+            session['role'] = row.role or 'operator'
+            session['must_change_password'] = bool(row.must_change_password)
+            session.permanent = True
+            return redirect(next_url)
+
+        flash(t('Invalid username or password.'))
+
+    return render_template('login.html', next_url=next_url, portal_title=portal_title,
+                            switch_label=switch_label, switch_endpoint=switch_endpoint)
+
+
+def admin_login():
+    return _portal_login('admin', t('Admin Portal'), t('Operator? Sign in here'), 'operator_login')
+
+
+def operator_login():
+    return _portal_login('operator', t('Operator Portal'), t('Admin? Sign in here'), 'admin_login')
 
 
 def logout():
@@ -196,6 +252,8 @@ def register(app):
     app.add_url_rule('/setup', 'setup', setup, methods=['GET', 'POST'])
     app.add_url_rule('/setup/demo', 'setup_demo', setup_demo, methods=['POST'])
     app.add_url_rule('/login', 'login', login, methods=['GET', 'POST'])
+    app.add_url_rule('/admin/login', 'admin_login', admin_login, methods=['GET', 'POST'])
+    app.add_url_rule('/operator/login', 'operator_login', operator_login, methods=['GET', 'POST'])
     app.add_url_rule('/logout', 'logout', logout, methods=['GET', 'POST'])
     app.add_url_rule('/change-password', 'change_password', change_password, methods=['GET', 'POST'])
     app.add_url_rule('/users', 'users_index', users_index)

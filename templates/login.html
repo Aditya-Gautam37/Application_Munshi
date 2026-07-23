@@ -28,7 +28,7 @@
       </div>
       <div class="login-brand">
         <div class="login-brand-logo">M</div>
-        <div class="login-brand-name">Munshi</div>
+        <div class="login-brand-name">Munshi{% if portal_title %} &middot; {{ portal_title }}{% endif %}</div>
       </div>
 
       {% with msgs = get_flashed_messages() %}
@@ -58,6 +58,11 @@
       <div class="login-hint mt-3 text-center">
         {{ t("Don't have a login? Ask your admin to create one for you.") }}
       </div>
+      {% if switch_endpoint %}
+        <div class="login-hint mt-2 text-center">
+          <a href="{{ url_for(switch_endpoint, next=next_url) }}">{{ switch_label }}</a>
+        </div>
+      {% endif %}
     </div>
   </div>
 </body>

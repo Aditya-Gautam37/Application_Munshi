@@ -1402,7 +1402,7 @@ from munshi.services import auth_service
 
 # Endpoints that don't require auth. 'setup'/'setup_demo' are the first-run
 # wizard, reached before any user exists.
-_PUBLIC_ENDPOINTS = {'login', 'static', 'health', 'setup', 'setup_demo', 'set_lang', 'service_worker'}
+_PUBLIC_ENDPOINTS = {'login', 'admin_login', 'operator_login', 'static', 'health', 'setup', 'setup_demo', 'set_lang', 'service_worker'}
 
 _hash_password = auth_service.hash_password
 _verify_password = auth_service.verify_password
