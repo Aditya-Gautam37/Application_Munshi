@@ -123,6 +123,16 @@ def _login(client, username, password):
     }, follow_redirects=False)
 
 
+def _login_portal(client, url, username, password):
+    """Generic version of _login() for /admin/login or /operator/login —
+    same CSRF dance, different endpoint."""
+    client.get(url)
+    token = _csrf(client)
+    return client.post(url, data={
+        'username': username, 'password': password, 'csrf_token': token,
+    }, follow_redirects=False)
+
+
 def test_setup_and_login_persist_to_postgres(pg_client):
     client, username = pg_client
     resp = _setup(client, username, 'Owner1234')
@@ -223,3 +233,55 @@ def test_record_manual_payment_reduces_client_balance(pg_client):
 
     hub = client.get('/payments')
     assert hub.status_code == 200
+
+
+def test_admin_and_operator_portals_enforce_role_in_pg_mode(pg_client):
+    """The /admin/login and /operator/login role-scoped portals were only
+    ever tested against SQLite (tests/test_smoke.py has no coverage for
+    them at all, in either mode) — this is the first test proving they
+    work correctly when the users table lives in Postgres, including the
+    role-mismatch refusal in both directions."""
+    from sqlalchemy import delete
+
+    from munshi.pg import database as pg_database
+    from munshi.pg.auth_models import User as PgUser
+
+    client, admin_username = pg_client
+    _setup(client, admin_username, 'Owner1234')  # setup wizard always creates an admin
+
+    operator_username = f'{admin_username}_op'
+    try:
+        # Admin succeeds at /admin/login.
+        client.get('/logout')
+        resp = _login_portal(client, '/admin/login', admin_username, 'Owner1234')
+        assert resp.status_code == 302
+        assert '/admin/login' not in resp.headers.get('Location', '')
+
+        # That same admin is REFUSED at /operator/login (wrong portal for their role).
+        client.get('/logout')
+        resp = _login_portal(client, '/operator/login', admin_username, 'Owner1234')
+        assert resp.status_code == 200  # re-renders the portal form, not a redirect
+
+        # Admin creates an operator account (first-login password = username).
+        client.get('/logout')
+        _login_portal(client, '/admin/login', admin_username, 'Owner1234')
+        token = _csrf(client)
+        client.post('/users/add', data={
+            'csrf_token': token, 'username': operator_username,
+            'full_name': 'PG Test Operator', 'role': 'operator',
+        }, follow_redirects=False)
+
+        # Operator succeeds at /operator/login.
+        client.get('/logout')
+        resp = _login_portal(client, '/operator/login', operator_username, operator_username)
+        assert resp.status_code == 302
+        assert '/operator/login' not in resp.headers.get('Location', '')
+
+        # That operator is REFUSED at /admin/login.
+        client.get('/logout')
+        resp = _login_portal(client, '/admin/login', operator_username, operator_username)
+        assert resp.status_code == 200
+    finally:
+        session = pg_database.get_session()
+        session.execute(delete(PgUser).where(PgUser.username == operator_username))
+        session.commit()
