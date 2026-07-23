@@ -18,6 +18,7 @@ from sqlalchemy import create_engine, pool
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 from munshi.pg import models  # noqa: E402  (registers all models on Base.metadata)
+from munshi.pg import auth_models  # noqa: E402  (non-tenant users/login_failures — see that module's docstring)
 from munshi.pg.base import Base  # noqa: E402
 
 config = context.config

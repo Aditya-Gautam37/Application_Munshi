@@ -351,6 +351,21 @@ class LedgerEntry(Base):
     diesel: Mapped[float | None] = mapped_column(Numeric, server_default='0')
     diesel_vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('diesel_vendors.id'))
     transporter_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('transporters.id'))
+
+    # POD-time settlement adjustments — deducted from the transporter's net
+    # (shortage/leakage/breakage/unloading) or added back (detention/toll_tax/
+    # excess_km). Read by ledger_service.ledger_balance() and
+    # payment_service._transporter_charges_net(); must stay in sync with both
+    # (see migration munshi/pg/migrations/versions/0002_ledger_settlement_fields.py,
+    # which ports these from app.py's _add_column_if_missing() SQLite additions).
+    shortage: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+    leakage: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+    breakage: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+    unloading: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+    detention: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+    toll_tax: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+    excess_km: Mapped[float | None] = mapped_column(Numeric, server_default='0')
+
     pod_received: Mapped[bool] = mapped_column(Boolean, server_default='false')
     pod_date: Mapped[object | None] = mapped_column(Date)
     pod_image: Mapped[str | None] = mapped_column(Text)  # Supabase Storage object key

@@ -40,6 +40,20 @@ os.environ.pop("LICENSE_SERVER_URL", None)
 
 import app as appmod  # noqa: E402  (import must follow the env setup above)
 from munshi.services import auth_service as _auth_service  # noqa: E402
+from munshi.repositories import user_repository as _user_repository  # noqa: E402
+
+# Force SQLite mode regardless of .env's DATABASE_URL. app.py's own
+# load_dotenv(override=True) call (near its top) re-injects .env's
+# DATABASE_URL into os.environ even if it was popped beforehand — override=True
+# means the file always wins over whatever the shell/test already set. So
+# PG_MODE can't be kept off by not setting DATABASE_URL in the test
+# environment; it must be forced off explicitly here, on both app.py's own
+# flag and user_repository.py's independent copy of it (see each module's
+# PG_MODE comment), or these tests would silently exercise Postgres instead
+# of SQLite whenever a real DATABASE_URL happens to be configured locally.
+appmod.PG_MODE = False
+appmod.ORG_ID = None
+_user_repository.PG_MODE = False
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

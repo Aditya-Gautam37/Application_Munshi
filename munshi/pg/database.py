@@ -31,11 +31,24 @@ def bind(database_url):
     """(Re)point this module's engine/session factory at `database_url`
     (a Supabase Postgres connection string, e.g.
     postgresql+psycopg://postgres:<password>@<host>:5432/postgres).
-    Disposes any previous engine first."""
+    Disposes any previous engine first.
+
+    `prepare_threshold=None` disables psycopg3's automatic server-side
+    prepared statements — required through Supabase's shared Transaction-
+    mode pooler (PgBouncer), which can route successive queries on the same
+    client-side connection to DIFFERENT backend Postgres connections. A
+    prepared statement psycopg thinks it already created (client-side
+    bookkeeping) may not exist on whichever backend PgBouncer picks next,
+    surfacing as `psycopg.errors.DuplicatePreparedStatement` or "prepared
+    statement does not exist" after enough queries. Discovered empirically
+    (2026-07) via Phase 2's test suite after ~10 queries on one session."""
     global _engine, _session_factory
     if _engine is not None:
         _engine.dispose()
-    _engine = create_engine(database_url, future=True, pool_pre_ping=True)
+    _engine = create_engine(
+        database_url, future=True, pool_pre_ping=True,
+        connect_args={'prepare_threshold': None},
+    )
     _session_factory = scoped_session(sessionmaker(bind=_engine, future=True))
 
 

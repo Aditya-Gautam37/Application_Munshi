@@ -77,6 +77,20 @@ UPLOAD_DIR = _cfg.UPLOAD_DIR
 BACKUP_DIR = _cfg.BACKUP_DIR
 ALLOWED_EXTS = _cfg.ALLOWED_EXTS
 MAX_EXTRACTION_FILES = _cfg.MAX_EXTRACTION_FILES
+
+# PG_MODE: this one deployment's data (bills/ledger/payments/transporters/
+# settings/users — NOT yet challans/masters-diesel/reports/extraction/audit/
+# backup, see .claude/plans/streamed-giggling-crescent.md for the scope
+# boundary) lives in Postgres/Supabase instead of the local SQLite file,
+# because Render's container disk is ephemeral and wipes bills.db on every
+# redeploy. Single business, not multi-tenant — ORG_ID is the one fixed
+# Organization row (see munshi/pg/bootstrap_single_org.py). Both env vars
+# unset (the desktop build, and any local dev run without them) => PG_MODE
+# is False and every route below behaves exactly as it always has — this
+# flag must stay False by default for the desktop PyInstaller build, which
+# excludes psycopg/alembic/jwt entirely (build/munshi.spec).
+PG_MODE = bool(os.environ.get('DATABASE_URL', '').strip())
+ORG_ID = os.environ.get('MUNSHI_ORGANIZATION_ID', '').strip() or None
 app.config['MAX_CONTENT_LENGTH'] = _cfg.MAX_CONTENT_LENGTH
 app.config['PERMANENT_SESSION_LIFETIME'] = _cfg.PERMANENT_SESSION_LIFETIME
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -206,6 +220,15 @@ def init_db():
     # "reassign DB_PATH, then call init_db()" pattern keep working with no
     # test-file changes as domains move onto SQLAlchemy sessions.
     _db_engine.bind(DB_PATH)
+    # PG_MODE: also bind the Postgres engine. Deferred import — see PG_MODE's
+    # own comment above for why munshi.pg must never be imported unless this
+    # branch is actually taken (desktop build excludes psycopg/alembic/jwt).
+    # The SQLite schema below still gets created either way: domains not yet
+    # migrated (challans, masters-diesel, reports, extraction, audit, backup)
+    # still run against it even in PG_MODE.
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        _pg_database.bind(os.environ['DATABASE_URL'])
     conn = get_db()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS bills (
@@ -735,14 +758,19 @@ def init_db():
     # If this DB already has at least one user AND a non-empty supplier_name,
     # it's the founder's existing (or any previously-configured) install — it
     # must NEVER be sent to the first-run wizard. Flag it complete once.
-    _setup_row = conn.execute("SELECT value FROM settings WHERE key='setup_complete'").fetchone()
-    if not _setup_row or _setup_row['value'] != '1':
-        _has_user = conn.execute('SELECT 1 FROM users LIMIT 1').fetchone() is not None
-        _sup_row = conn.execute("SELECT value FROM settings WHERE key='supplier_name'").fetchone()
-        _has_supplier = bool(_sup_row and (_sup_row['value'] or '').strip())
-        if _has_user and _has_supplier:
-            conn.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
-                         ('setup_complete', '1'))
+    # Skipped entirely in PG_MODE: users/settings/setup_complete all live in
+    # Postgres there (via user_repository.py's/get_setting's PG_MODE branch),
+    # so this SQLite-only scan is irrelevant — the org was already bootstrapped
+    # explicitly via munshi/pg/bootstrap_single_org.py, not auto-detected.
+    if not PG_MODE:
+        _setup_row = conn.execute("SELECT value FROM settings WHERE key='setup_complete'").fetchone()
+        if not _setup_row or _setup_row['value'] != '1':
+            _has_user = conn.execute('SELECT 1 FROM users LIMIT 1').fetchone() is not None
+            _sup_row = conn.execute("SELECT value FROM settings WHERE key='supplier_name'").fetchone()
+            _has_supplier = bool(_sup_row and (_sup_row['value'] or '').strip())
+            if _has_user and _has_supplier:
+                conn.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                             ('setup_complete', '1'))
 
     # ── Crash recovery: if Flask was killed while an extraction was running in
     # a background thread, the thread is gone but the row is still 'pending'.
@@ -798,6 +826,9 @@ def _ensure_archive_table(conn, src):
 
 
 def get_setting(key):
+    if PG_MODE:
+        from munshi.pg.services import settings_service as _pg_settings
+        return _pg_settings.get_setting(ORG_ID, key)
     conn = get_db()
     row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
     conn.close()
@@ -805,6 +836,9 @@ def get_setting(key):
 
 
 def set_setting(key, value):
+    if PG_MODE:
+        from munshi.pg.services import settings_service as _pg_settings
+        return _pg_settings.set_setting(ORG_ID, key, value)
     conn = get_db()
     conn.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (key, value))
     conn.commit()
@@ -1261,6 +1295,11 @@ def get_party_balance(party_type, party_key):
     """Positive number = the balance still pending.
        For client: how much they owe us.
        For transporter / diesel: how much we owe them."""
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import payment_service as _pg_payments
+        pg_session = _pg_database.get_session()
+        return _pg_payments.get_party_balance(pg_session, ORG_ID, party_type, party_key)
     conn = get_db()
     if party_type == 'client':
         charges = _client_charges(conn, party_key)
@@ -1309,9 +1348,83 @@ def _auto_payment_remove(conn, ref):
     conn.execute('DELETE FROM payments WHERE reference=?', (ref,))
 
 
+def _pg_get_party_transactions(party_type, party_key, limit=200):
+    """PG_MODE version of get_party_transactions() — same query shape/logic,
+    against Postgres, scoped to ORG_ID. Display-only (transaction history
+    list), not part of the balance-of-truth math itself."""
+    from decimal import Decimal as _Decimal
+    from munshi.pg import database as _pg_database
+    from munshi.pg.services import ledger_service as _pg_ledger
+    from sqlalchemy import text
+    session = _pg_database.get_session()
+    items = []
+
+    def _num(v):
+        return float(v) if isinstance(v, _Decimal) else (v or 0)
+
+    if party_type == 'client':
+        for r in session.execute(
+            text('SELECT id, bill_no, bill_date, total_amount FROM bills '
+                 'WHERE organization_id=:org AND recipient_name=:key '
+                 'ORDER BY bill_date DESC, id DESC LIMIT :lim'),
+            {'org': ORG_ID, 'key': party_key, 'lim': limit},
+        ).fetchall():
+            items.append({
+                'date': r[2], 'kind': 'charge', 'label': f'Bill {r[1]}',
+                'amount': _num(r[3]), 'link': url_for('view_bill', bill_id=r[0]),
+            })
+    elif party_type == 'transporter':
+        rows = session.execute(
+            text('SELECT * FROM ledger_entries WHERE organization_id=:org AND transporter_id=:key '
+                 'ORDER BY entry_date DESC, id DESC LIMIT :lim'),
+            {'org': ORG_ID, 'key': int(party_key), 'lim': limit},
+        ).mappings().all()
+        for r in rows:
+            net = _pg_ledger.ledger_balance(r)
+            if net != 0:
+                items.append({
+                    'date': r['entry_date'], 'kind': 'charge',
+                    'label': f'Trip GR-{r["gr_no"] or r["id"]} (net after on-trip advances & settlement adjustments)',
+                    'amount': net, 'link': url_for('ledger_view', le_id=r['id']),
+                })
+    elif party_type == 'diesel_vendor':
+        for r in session.execute(
+            text('SELECT id, gr_no, entry_date, diesel, vehicle_no FROM ledger_entries '
+                 'WHERE organization_id=:org AND diesel_vendor_id=:key AND diesel > 0 '
+                 'ORDER BY entry_date DESC, id DESC LIMIT :lim'),
+            {'org': ORG_ID, 'key': int(party_key), 'lim': limit},
+        ).fetchall():
+            items.append({
+                'date': r[2], 'kind': 'charge',
+                'label': f'Diesel for GR-{r[1] or r[0]} ({r[4] or "—"})',
+                'amount': _num(r[3]), 'link': url_for('ledger_view', le_id=r[0]),
+            })
+
+    for r in session.execute(
+        text('SELECT id, payment_date, amount, mode, reference, notes FROM payments '
+             'WHERE organization_id=:org AND party_type=:pt AND party_key=:pk '
+             'ORDER BY payment_date DESC, id DESC LIMIT :lim'),
+        {'org': ORG_ID, 'pt': party_type, 'pk': str(party_key), 'lim': limit},
+    ).fetchall():
+        label = 'Payment ' + ('received' if party_type == 'client' else 'paid')
+        if r[3]: label += f' ({r[3]})'
+        if r[4]: label += f' • ref {r[4]}'
+        items.append({
+            'date': r[1], 'kind': 'payment',
+            'label': label + (' — ' + r[5] if r[5] else ''),
+            'amount': -_num(r[2]),
+            'payment_id': r[0],
+        })
+
+    items.sort(key=lambda x: (str(x.get('date') or ''), x.get('payment_id', 0)), reverse=True)
+    return items
+
+
 def get_party_transactions(party_type, party_key, limit=200):
     """Return interleaved chronological list of charges (bills/trips/diesel-given)
        and payments for a given party. Each item: dict with date, kind, amount, ref, link."""
+    if PG_MODE:
+        return _pg_get_party_transactions(party_type, party_key, limit)
     conn = get_db()
     items = []
 
@@ -1375,11 +1488,21 @@ def get_party_transactions(party_type, party_key, limit=200):
 
 def list_clients_with_balance():
     """Distinct clients (recipient_name) ever billed, with their current balance."""
-    conn = get_db()
-    names = [r[0] for r in conn.execute(
-        'SELECT DISTINCT recipient_name FROM bills WHERE recipient_name IS NOT NULL'
-    ).fetchall()]
-    conn.close()
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from sqlalchemy import text
+        session = _pg_database.get_session()
+        names = [r[0] for r in session.execute(
+            text('SELECT DISTINCT recipient_name FROM bills '
+                 'WHERE organization_id=:org AND recipient_name IS NOT NULL'),
+            {'org': ORG_ID},
+        ).fetchall()]
+    else:
+        conn = get_db()
+        names = [r[0] for r in conn.execute(
+            'SELECT DISTINCT recipient_name FROM bills WHERE recipient_name IS NOT NULL'
+        ).fetchall()]
+        conn.close()
     out = []
     for n in sorted(names):
         if not n:
@@ -2506,57 +2629,97 @@ def new_bill():
                                 supplier_state, place_of_supply, reverse_charge)
         total = tax['grand_total']
 
-        # Allocate a collision-proof bill number and insert. If the number is
-        # already taken (a racing save, or demo/imported data whose numbers ran
-        # ahead of the counter), re-allocate from the current max and retry
-        # rather than crashing with a UNIQUE-constraint 500.
-        for _attempt in range(6):
-            bill_no, n = _alloc_bill_no(conn)
+        from_le = f.get('from_ledger_id')
+        from_le_id = int(from_le) if (from_le and from_le.isdigit()) else None
+
+        if PG_MODE:
+            # Bill numbering, GST split (compute_gst_split, called inside
+            # create_bill — same function, not re-implemented), and the
+            # bill<->ledger link all happen in Postgres via the already-
+            # tested bill_service. remember_recipient/remember_vehicle and
+            # log_audit are deliberately left on the SQLite `conn` below —
+            # out of this round's scope (autocomplete memory) or explicitly
+            # deferred (audit trail), same as the auth domain.
+            from datetime import date as _date
+            from munshi.pg import database as _pg_database
+            from munshi.pg.services import bill_service as _pg_bills
             try:
-                conn.execute(
-                    '''INSERT INTO bills
-                       (bill_no, bill_date, recipient_name, recipient_address, recipient_gstin,
-                        state_code, trip_type, vehicle_no, freight_type, delivery_month,
-                        client_name, total_amount, deliveries, created_at,
-                        hsn_sac, taxable_value, reverse_charge, place_of_supply,
-                        igst_pct, cgst_pct, sgst_pct,
-                        igst_amount, cgst_amount, sgst_amount)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                    (bill_no,
-                     bill_date_val, recipient_name_val, f.get('recipient_address'),
-                     f.get('recipient_gstin'), f.get('state_code'), f.get('trip_type'),
-                     vehicle_no_val, get_setting('freight_type'), delivery_month_val,
-                     f.get('client_name', get_setting('client_name')),
-                     total, json.dumps(deliveries), datetime.now().isoformat(),
-                     hsn_sac, taxable_value, reverse_charge, place_of_supply,
-                     tax['igst_pct'], tax['cgst_pct'], tax['sgst_pct'],
-                     tax['igst_amount'], tax['cgst_amount'], tax['sgst_amount'])
-                )
-                break
-            except sqlite3.IntegrityError:
-                if _attempt == 5:
-                    conn.rollback()
-                    conn.close()
-                    flash('Could not assign a unique bill number just now — please try saving again.')
-                    return redirect(url_for('new_bill'))
-                # else: loop re-allocates from the (now higher) max and retries
-        bill_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
-        conn.execute('UPDATE settings SET value=? WHERE key=?', (str(n + 1), 'next_bill_number'))
+                bill_date_parsed = _date.fromisoformat(bill_date_val) if bill_date_val else None
+            except ValueError:
+                bill_date_parsed = None
+            pg_session = _pg_database.get_session()
+            bill = _pg_bills.create_bill(
+                pg_session, ORG_ID,
+                deliveries=deliveries,
+                bill_date=bill_date_parsed,
+                recipient_name=recipient_name_val,
+                recipient_address=f.get('recipient_address'),
+                recipient_gstin=f.get('recipient_gstin'),
+                state_code=f.get('state_code'),
+                trip_type=f.get('trip_type'),
+                vehicle_no=vehicle_no_val,
+                freight_type=get_setting('freight_type'),
+                delivery_month=delivery_month_val,
+                client_name=f.get('client_name', get_setting('client_name')),
+                hsn_sac=hsn_sac,
+                place_of_supply=place_of_supply,
+                reverse_charge=bool(reverse_charge),
+                gst_pct=gst_pct or 0,
+                supplier_state=supplier_state,
+                from_ledger_id=from_le_id,
+            )
+            pg_session.commit()
+            bill_id, bill_no, total = bill.id, bill.bill_no, float(bill.total_amount)
+        else:
+            # Allocate a collision-proof bill number and insert. If the number is
+            # already taken (a racing save, or demo/imported data whose numbers ran
+            # ahead of the counter), re-allocate from the current max and retry
+            # rather than crashing with a UNIQUE-constraint 500.
+            for _attempt in range(6):
+                bill_no, n = _alloc_bill_no(conn)
+                try:
+                    conn.execute(
+                        '''INSERT INTO bills
+                           (bill_no, bill_date, recipient_name, recipient_address, recipient_gstin,
+                            state_code, trip_type, vehicle_no, freight_type, delivery_month,
+                            client_name, total_amount, deliveries, created_at,
+                            hsn_sac, taxable_value, reverse_charge, place_of_supply,
+                            igst_pct, cgst_pct, sgst_pct,
+                            igst_amount, cgst_amount, sgst_amount)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (bill_no,
+                         bill_date_val, recipient_name_val, f.get('recipient_address'),
+                         f.get('recipient_gstin'), f.get('state_code'), f.get('trip_type'),
+                         vehicle_no_val, get_setting('freight_type'), delivery_month_val,
+                         f.get('client_name', get_setting('client_name')),
+                         total, json.dumps(deliveries), datetime.now().isoformat(),
+                         hsn_sac, taxable_value, reverse_charge, place_of_supply,
+                         tax['igst_pct'], tax['cgst_pct'], tax['sgst_pct'],
+                         tax['igst_amount'], tax['cgst_amount'], tax['sgst_amount'])
+                    )
+                    break
+                except sqlite3.IntegrityError:
+                    if _attempt == 5:
+                        conn.rollback()
+                        conn.close()
+                        flash('Could not assign a unique bill number just now — please try saving again.')
+                        return redirect(url_for('new_bill'))
+                    # else: loop re-allocates from the (now higher) max and retries
+            bill_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            conn.execute('UPDATE settings SET value=? WHERE key=?', (str(n + 1), 'next_bill_number'))
+
+            # Phase D: link bill ↔ ledger if this bill came from a ledger entry
+            if from_le_id is not None:
+                conn.execute('UPDATE bills SET ledger_entry_id=? WHERE id=?', (from_le_id, bill_id))
+                conn.execute('UPDATE ledger_entries SET bill_id=?, updated_at=? WHERE id=?',
+                             (bill_id, datetime.now().isoformat(), from_le_id))
+                log_audit(conn, 'update', 'ledger_entry', from_le_id,
+                          summary=f'Linked to bill {bill_no}', changes={'bill_id': [None, bill_id]})
+
         remember_recipient(conn, recipient_name_val, f.get('recipient_address'),
                            f.get('recipient_gstin'), f.get('state_code'),
                            freight_rate=f.get('d_freight_rate_0'))
         remember_vehicle(conn, vehicle_no_val)
-
-        # Phase D: link bill ↔ ledger if this bill came from a ledger entry
-        from_le = f.get('from_ledger_id')
-        if from_le and from_le.isdigit():
-            le_id = int(from_le)
-            conn.execute('UPDATE bills SET ledger_entry_id=? WHERE id=?', (le_id, bill_id))
-            conn.execute('UPDATE ledger_entries SET bill_id=?, updated_at=? WHERE id=?',
-                         (bill_id, datetime.now().isoformat(), le_id))
-            log_audit(conn, 'update', 'ledger_entry', le_id,
-                      summary=f'Linked to bill {bill_no}', changes={'bill_id': [None, bill_id]})
-
         log_audit(conn, 'create', 'bill', bill_id,
                   summary=f'Created bill {bill_no} for {recipient_name_val} · ₹{total:,.2f}')
         conn.commit()
@@ -2750,17 +2913,33 @@ def _parse_amount(v):
 
 @app.route('/bill/<int:bill_id>')
 def view_bill(bill_id):
-    conn = get_db()
-    row = conn.execute('SELECT * FROM bills WHERE id=?', (bill_id,)).fetchone()
-    conn.close()
-    if not row:
-        return 'Bill not found', 404
-    bill = dict(row)
-    bill['deliveries'] = json.loads(bill['deliveries'] or '[]')
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Bill as _PgBill
+        pg_session = _pg_database.get_session()
+        row = pg_session.get(_PgBill, bill_id)
+        if row is None or str(row.organization_id) != str(ORG_ID):
+            return 'Bill not found', 404
+        from decimal import Decimal as _Decimal
+        bill = {c.name: getattr(row, c.name) for c in row.__table__.columns}
+        bill = {k: (float(v) if isinstance(v, _Decimal) else v) for k, v in bill.items()}
+        bill['deliveries'] = bill['deliveries'] or []
+        # Audit trail for bills created in PG_MODE isn't ported this round
+        # (see .claude/plans/streamed-giggling-crescent.md) — empty, not an error.
+        audit_entries = []
+    else:
+        conn = get_db()
+        row = conn.execute('SELECT * FROM bills WHERE id=?', (bill_id,)).fetchone()
+        conn.close()
+        if not row:
+            return 'Bill not found', 404
+        bill = dict(row)
+        bill['deliveries'] = json.loads(bill['deliveries'] or '[]')
+        audit_entries = get_audit_for('bill', bill_id)
     return render_template('bill_view.html', bill=bill,
                            vehicle_type=get_setting('vehicle_type'),
                            freight_type=get_setting('freight_type'),
-                           audit_entries=get_audit_for('bill', bill_id))
+                           audit_entries=audit_entries)
 
 
 @app.route('/bill/<int:bill_id>/einvoice.json')
@@ -4686,6 +4865,16 @@ def challan_delete(challan_id):
 
 # ── Transporter helpers ──
 def get_transporters():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import transporter_service as _pg_transporters
+        pg_session = _pg_database.get_session()
+        return [
+            {'id': t.id, 'name': t.name, 'mobile': t.mobile,
+             'bank_details': t.bank_details, 'notes': t.notes}
+            for t in _pg_transporters.list_transporters(pg_session)
+            if str(t.organization_id) == str(ORG_ID)
+        ]
     conn = get_db()
     rows = conn.execute('SELECT id, name, mobile, bank_details, notes FROM transporters ORDER BY name').fetchall()
     conn.close()
@@ -4693,6 +4882,15 @@ def get_transporters():
 
 
 def get_diesel_vendors():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import diesel_vendor_service as _pg_diesel
+        pg_session = _pg_database.get_session()
+        return [
+            {'id': v.id, 'name': v.name, 'location': v.location, 'notes': v.notes}
+            for v in _pg_diesel.list_diesel_vendors(pg_session)
+            if str(v.organization_id) == str(ORG_ID)
+        ]
     conn = get_db()
     rows = conn.execute('SELECT id, name, location, notes FROM diesel_vendors ORDER BY name').fetchall()
     conn.close()
@@ -4747,6 +4945,25 @@ def transporter_add():
     if not name:
         flash('Transporter name required.')
         return redirect(url_for('masters_index'))
+
+    if PG_MODE:
+        from sqlalchemy.exc import IntegrityError as _PgIntegrityError
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import transporter_service as _pg_transporters
+        pg_session = _pg_database.get_session()
+        try:
+            _pg_transporters.create_transporter(
+                pg_session, ORG_ID, name,
+                mobile=f.get('mobile') or '', bank_details=f.get('bank_details') or '',
+                notes=f.get('notes') or '',
+            )
+            pg_session.commit()
+            flash(f'Transporter "{name}" added.')
+        except _PgIntegrityError:
+            pg_session.rollback()
+            flash(f'Transporter "{name}" already exists.')
+        return redirect(url_for('masters_index'))
+
     conn = get_db()
     try:
         conn.execute(
@@ -4767,6 +4984,15 @@ def transporter_add():
 
 @app.route('/masters/transporter/<int:tid>/delete', methods=['POST'])
 def transporter_delete(tid):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import transporter_service as _pg_transporters
+        pg_session = _pg_database.get_session()
+        _pg_transporters.delete_transporter(pg_session, ORG_ID, tid)
+        pg_session.commit()
+        flash('Transporter removed.')
+        return redirect(url_for('masters_index'))
+
     conn = get_db()
     row = conn.execute('SELECT name FROM transporters WHERE id=?', (tid,)).fetchone()
     name = row['name'] if row else f'#{tid}'
@@ -4934,33 +5160,77 @@ def ledger_new():
 
 def _ledger_save_new():
     f = request.form
-    conn = get_db()
-    diesel_vendor_id = remember_diesel_vendor(conn, f.get('diesel_vendor_name'))
-    conn.execute('''
-        INSERT INTO ledger_entries (
-          challan_id, entry_date, gr_no, vehicle_no, station, shipment_no, trip_type,
-          mt_qty, freight, advance_cash, advance_account, diesel,
-          diesel_vendor_id, transporter_id, remarks, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    ''', (
-        f.get('challan_id') or None, f.get('entry_date'),
-        (f.get('gr_no') or '').strip(), (f.get('vehicle_no') or '').strip().upper(),
-        f.get('station'), f.get('shipment_no'), f.get('trip_type', 'One Way'),
-        _safe_num(f.get('mt_qty')), _safe_num(f.get('freight')),
-        _safe_num(f.get('advance_cash')) or 0, _safe_num(f.get('advance_account')) or 0,
-        _safe_num(f.get('diesel')) or 0,
-        diesel_vendor_id, f.get('transporter_id') or None,
-        f.get('remarks'), datetime.now().isoformat()
-    ))
-    new_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
-    remember_vehicle(conn, (f.get('vehicle_no') or '').strip().upper())
-    dupes = _find_duplicate_gr(conn, f.get('gr_no'), exclude_id=new_id)
-    conn.commit()
-    conn.close()
-    flash(f'Ledger entry GR-{f.get("gr_no") or new_id} saved.')
+    gr_no = (f.get('gr_no') or '').strip()
+    vehicle_no = (f.get('vehicle_no') or '').strip().upper()
+
+    if PG_MODE:
+        # challan_id is left out entirely — challans aren't ported to
+        # Postgres this round (see .claude/plans/streamed-giggling-crescent.md),
+        # so a SQLite challan_id would be meaningless here.
+        from sqlalchemy import text
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import diesel_vendor_service as _pg_diesel
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+        diesel_vendor_id = _pg_diesel.get_or_create_diesel_vendor(
+            pg_session, ORG_ID, f.get('diesel_vendor_name'))
+        entry = _pg_ledger.create_ledger_entry(
+            pg_session, ORG_ID,
+            entry_date=f.get('entry_date') or None, gr_no=gr_no, vehicle_no=vehicle_no,
+            station=f.get('station'), shipment_no=f.get('shipment_no'),
+            trip_type=f.get('trip_type', 'One Way'),
+            mt_qty=_safe_num(f.get('mt_qty')), freight=_safe_num(f.get('freight')),
+            advance_cash=_safe_num(f.get('advance_cash')) or 0,
+            advance_account=_safe_num(f.get('advance_account')) or 0,
+            diesel=_safe_num(f.get('diesel')) or 0,
+            diesel_vendor_id=diesel_vendor_id, transporter_id=f.get('transporter_id') or None,
+            remarks=f.get('remarks'),
+        )
+        pg_session.commit()
+        new_id = entry.id
+        dupe_row = pg_session.execute(
+            text('SELECT id, entry_date, vehicle_no FROM ledger_entries '
+                 'WHERE organization_id=:org AND gr_no=:gr AND id!=:eid LIMIT 1'),
+            {'org': ORG_ID, 'gr': gr_no, 'eid': new_id},
+        ).fetchone() if gr_no else None
+        dupes = [{'id': dupe_row[0], 'entry_date': dupe_row[1], 'vehicle_no': dupe_row[2]}] if dupe_row else []
+    else:
+        conn = get_db()
+        diesel_vendor_id = remember_diesel_vendor(conn, f.get('diesel_vendor_name'))
+        conn.execute('''
+            INSERT INTO ledger_entries (
+              challan_id, entry_date, gr_no, vehicle_no, station, shipment_no, trip_type,
+              mt_qty, freight, advance_cash, advance_account, diesel,
+              diesel_vendor_id, transporter_id, remarks, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ''', (
+            f.get('challan_id') or None, f.get('entry_date'),
+            gr_no, vehicle_no,
+            f.get('station'), f.get('shipment_no'), f.get('trip_type', 'One Way'),
+            _safe_num(f.get('mt_qty')), _safe_num(f.get('freight')),
+            _safe_num(f.get('advance_cash')) or 0, _safe_num(f.get('advance_account')) or 0,
+            _safe_num(f.get('diesel')) or 0,
+            diesel_vendor_id, f.get('transporter_id') or None,
+            f.get('remarks'), datetime.now().isoformat()
+        ))
+        new_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        dupes = _find_duplicate_gr(conn, gr_no, exclude_id=new_id)
+        conn.commit()
+        conn.close()
+
+    # remember_vehicle's autocomplete memory stays on SQLite regardless of
+    # PG_MODE (out of this round's scope, same as remember_recipient) — its
+    # own short-lived connection, since PG_MODE's branch above already
+    # closed its Postgres session, not a SQLite one.
+    _veh_conn = get_db()
+    remember_vehicle(_veh_conn, vehicle_no)
+    _veh_conn.commit()
+    _veh_conn.close()
+
+    flash(f'Ledger entry GR-{gr_no or new_id} saved.')
     if dupes:
         other = dupes[0]
-        flash(f'⚠ Heads up: GR-{(f.get("gr_no") or "").strip()} already exists on another entry '
+        flash(f'⚠ Heads up: GR-{gr_no} already exists on another entry '
               f'(#{other["id"]}, {other["entry_date"] or "no date"}, {other["vehicle_no"] or ""}) — '
               f'check you haven\'t created a duplicate of the same trip.')
     return redirect(url_for('ledger_view', le_id=new_id))
@@ -4968,6 +5238,65 @@ def _ledger_save_new():
 
 @app.route('/ledger/<int:le_id>', methods=['GET', 'POST'])
 def ledger_view(le_id):
+    if PG_MODE:
+        from decimal import Decimal as _Decimal
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import diesel_vendor_service as _pg_diesel
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+
+        if request.method == 'POST':
+            f = request.form
+            gr_no = (f.get('gr_no') or '').strip()
+            vehicle_no = (f.get('vehicle_no') or '').strip().upper()
+            diesel_vendor_id = _pg_diesel.get_or_create_diesel_vendor(
+                pg_session, ORG_ID, f.get('diesel_vendor_name'))
+            entry = _pg_ledger.update_ledger_entry(
+                pg_session, ORG_ID, le_id,
+                entry_date=f.get('entry_date') or None, gr_no=gr_no, vehicle_no=vehicle_no,
+                station=f.get('station'), shipment_no=f.get('shipment_no'),
+                trip_type=f.get('trip_type', 'One Way'),
+                mt_qty=_safe_num(f.get('mt_qty')), freight=_safe_num(f.get('freight')),
+                advance_cash=_safe_num(f.get('advance_cash')) or 0,
+                advance_account=_safe_num(f.get('advance_account')) or 0,
+                diesel=_safe_num(f.get('diesel')) or 0,
+                diesel_vendor_id=diesel_vendor_id, transporter_id=f.get('transporter_id') or None,
+                remarks=f.get('remarks'),
+            )
+            if entry is None:
+                pg_session.rollback()
+                return 'Ledger entry not found', 404
+            pg_session.commit()
+            _veh_conn = get_db()
+            remember_vehicle(_veh_conn, vehicle_no)
+            _veh_conn.commit()
+            _veh_conn.close()
+            # Audit diff and duplicate-GR heads-up are deferred in PG_MODE
+            # this round, same as bills — see the plan doc.
+            flash('Ledger entry updated.')
+            return redirect(url_for('ledger_view', le_id=le_id))
+
+        entry_row = _pg_ledger.get_ledger_entry(pg_session, ORG_ID, le_id)
+        if entry_row is None:
+            return 'Ledger entry not found', 404
+        entry = {c.name: getattr(entry_row, c.name) for c in entry_row.__table__.columns}
+        entry = {k: (float(v) if isinstance(v, _Decimal) else v) for k, v in entry.items()}
+        entry['balance'] = _pg_ledger.ledger_balance(entry_row)
+        entry['diesel_vendor_name'] = None
+        if entry_row.diesel_vendor_id:
+            vendor = next(
+                (v for v in _pg_diesel.list_diesel_vendors(pg_session) if v.id == entry_row.diesel_vendor_id),
+                None,
+            )
+            entry['diesel_vendor_name'] = vendor.name if vendor else None
+        return render_template('ledger_form.html',
+                               entry=entry,
+                               transporters=get_transporters(),
+                               diesel_vendors=get_diesel_vendors(),
+                               vehicles=get_vehicles(),
+                               today=datetime.now().strftime('%Y-%m-%d'),
+                               audit_entries=[])
+
     conn = get_db()
     if request.method == 'POST':
         f = request.form
@@ -5210,6 +5539,26 @@ def ledger_amounts(le_id):
 def ledger_paid(le_id):
     f = request.form
     is_paid = 1 if f.get('paid') else 0
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+        try:
+            _pg_ledger.mark_ledger_paid(
+                pg_session, ORG_ID, le_id, is_paid=bool(is_paid),
+                paid_date=f.get('paid_date') or None, paid_mode=f.get('paid_mode'),
+                paid_amount=_safe_num(f.get('paid_amount')), paid_reference=f.get('paid_reference'),
+                created_by=current_user(),
+            )
+        except ValueError:
+            pg_session.rollback()
+            flash('Ledger entry not found.')
+            return redirect(url_for('ledger_index'))
+        pg_session.commit()
+        flash('Payment status updated.')
+        return redirect(url_for('ledger_view', le_id=le_id))
+
     conn = get_db()
     before_row = conn.execute(
         'SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
@@ -6028,34 +6377,73 @@ def party_detail(party_type, party_key):
 
     display_name = party_key
     extra_info = {}
-    if party_type == 'transporter':
-        conn = get_db()
-        r = conn.execute('SELECT * FROM transporters WHERE id=?', (party_key,)).fetchone()
-        conn.close()
-        if r:
-            display_name = r['name']
-            extra_info = {'mobile': r['mobile'], 'bank_details': r['bank_details']}
-    elif party_type == 'diesel_vendor':
-        conn = get_db()
-        r = conn.execute('SELECT * FROM diesel_vendors WHERE id=?', (party_key,)).fetchone()
-        conn.close()
-        if r:
-            display_name = r['name']
-            extra_info = {'location': r['location']}
+    if PG_MODE:
+        from decimal import Decimal as _Decimal
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import diesel_vendor_service as _pg_diesel
+        from munshi.pg.services import payment_service as _pg_payments
+        from munshi.pg.services import transporter_service as _pg_transporters
+        pg_session = _pg_database.get_session()
 
-    balance = get_party_balance(party_type, party_key)
-    transactions = get_party_transactions(party_type, party_key)
+        def _n(v):
+            return float(v) if isinstance(v, _Decimal) else v
 
-    # Compute charges + payments totals for the summary strip
-    conn = get_db()
-    if party_type == 'client':
-        total_charges = _client_charges(conn, party_key)
-    elif party_type == 'transporter':
-        total_charges = _transporter_charges_net(conn, party_key)
+        # transporter_id/diesel_vendor_id are BigInteger columns in Postgres
+        # — party_key arrives as a plain string (Flask URL path converter),
+        # which SQLite compared loosely without complaint but Postgres
+        # rejects outright ("operator does not exist: bigint = character
+        # varying"). Cast once here; get_party_balance() does its own
+        # equivalent cast internally for its callers.
+        if party_type == 'transporter':
+            r = _pg_transporters.get_transporter(pg_session, ORG_ID, int(party_key))
+            if r:
+                display_name = r.name
+                extra_info = {'mobile': r.mobile, 'bank_details': r.bank_details}
+        elif party_type == 'diesel_vendor':
+            r = next((v for v in _pg_diesel.list_diesel_vendors(pg_session) if v.id == int(party_key)), None)
+            if r:
+                display_name = r.name
+                extra_info = {'location': r.location}
+
+        balance = get_party_balance(party_type, party_key)
+        transactions = get_party_transactions(party_type, party_key)
+
+        if party_type == 'client':
+            total_charges = _pg_payments._client_charges(pg_session, ORG_ID, party_key)
+        elif party_type == 'transporter':
+            total_charges = _pg_payments._transporter_charges_net(pg_session, ORG_ID, int(party_key))
+        else:
+            total_charges = _pg_payments._diesel_vendor_charges(pg_session, ORG_ID, int(party_key))
+        total_paid = _pg_payments._payments_total(pg_session, ORG_ID, party_type, party_key)
     else:
-        total_charges = _diesel_vendor_charges(conn, party_key)
-    total_paid = _payments_total(conn, party_type, party_key)
-    conn.close()
+        if party_type == 'transporter':
+            conn = get_db()
+            r = conn.execute('SELECT * FROM transporters WHERE id=?', (party_key,)).fetchone()
+            conn.close()
+            if r:
+                display_name = r['name']
+                extra_info = {'mobile': r['mobile'], 'bank_details': r['bank_details']}
+        elif party_type == 'diesel_vendor':
+            conn = get_db()
+            r = conn.execute('SELECT * FROM diesel_vendors WHERE id=?', (party_key,)).fetchone()
+            conn.close()
+            if r:
+                display_name = r['name']
+                extra_info = {'location': r['location']}
+
+        balance = get_party_balance(party_type, party_key)
+        transactions = get_party_transactions(party_type, party_key)
+
+        # Compute charges + payments totals for the summary strip
+        conn = get_db()
+        if party_type == 'client':
+            total_charges = _client_charges(conn, party_key)
+        elif party_type == 'transporter':
+            total_charges = _transporter_charges_net(conn, party_key)
+        else:
+            total_charges = _diesel_vendor_charges(conn, party_key)
+        total_paid = _payments_total(conn, party_type, party_key)
+        conn.close()
 
     return render_template('party_detail.html',
         party_type=party_type, party_key=party_key, display_name=display_name,
@@ -6079,22 +6467,34 @@ def payment_add():
         flash('Amount must be greater than zero.')
         return redirect(url_for('party_detail', party_type=party_type, party_key=party_key))
 
-    conn = get_db()
-    conn.execute('''
-        INSERT INTO payments (party_type, party_key, payment_date, amount,
-                              mode, reference, notes, source, created_at, created_by)
-        VALUES (?,?,?,?,?,?,?, 'manual', ?, ?)
-    ''', (party_type, party_key,
-          f.get('payment_date') or datetime.now().strftime('%Y-%m-%d'),
-          amount, f.get('mode'), f.get('reference'), f.get('notes'),
-          datetime.now().isoformat(), current_user()))
-    pid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
-    direction = 'received from' if party_type == 'client' else 'paid to'
-    log_audit(conn, 'create', 'payment', pid,
-              summary=f'₹{amount:,.2f} {direction} {party_type} {party_key}'
-                      + (f' ({f.get("mode")})' if f.get('mode') else ''))
-    conn.commit()
-    conn.close()
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import payment_service as _pg_payments
+        pg_session = _pg_database.get_session()
+        _pg_payments.record_manual_payment(
+            pg_session, ORG_ID, party_type, party_key, amount,
+            payment_date=f.get('payment_date') or None,
+            mode=f.get('mode'), reference=f.get('reference'), notes=f.get('notes'),
+            created_by=current_user(),
+        )
+        pg_session.commit()
+    else:
+        conn = get_db()
+        conn.execute('''
+            INSERT INTO payments (party_type, party_key, payment_date, amount,
+                                  mode, reference, notes, source, created_at, created_by)
+            VALUES (?,?,?,?,?,?,?, 'manual', ?, ?)
+        ''', (party_type, party_key,
+              f.get('payment_date') or datetime.now().strftime('%Y-%m-%d'),
+              amount, f.get('mode'), f.get('reference'), f.get('notes'),
+              datetime.now().isoformat(), current_user()))
+        pid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        direction = 'received from' if party_type == 'client' else 'paid to'
+        log_audit(conn, 'create', 'payment', pid,
+                  summary=f'₹{amount:,.2f} {direction} {party_type} {party_key}'
+                          + (f' ({f.get("mode")})' if f.get('mode') else ''))
+        conn.commit()
+        conn.close()
     flash(f'Payment of ₹{amount:,.2f} recorded.')
     return redirect(url_for('party_detail', party_type=party_type, party_key=party_key))
 

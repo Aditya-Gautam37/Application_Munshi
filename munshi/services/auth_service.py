@@ -52,9 +52,19 @@ _LOGIN_LOCKOUT_SECONDS = 15 * 60      # lock the account this long once threshol
 
 
 def login_lockout_remaining(username):
-    """Seconds left in the lockout for this username, or 0 if not locked."""
+    """Seconds left in the lockout for this username, or 0 if not locked.
+
+    PG_MODE (DATABASE_URL set — the single-business Postgres cutover)
+    delegates to munshi/pg/services/user_service.py, which targets the
+    existing org-scoped login_failures table instead of SQLite. Deferred
+    import: the desktop build excludes psycopg/alembic/jwt entirely, so
+    munshi.pg must never be imported when this branch isn't taken."""
     if not username:
         return 0
+    if users.PG_MODE:
+        from munshi.pg.services import user_service as pg_users
+        return pg_users.login_lockout_remaining(username)
+
     import app as _app
 
     now = datetime.now()
@@ -83,6 +93,10 @@ def login_lockout_remaining(username):
 def record_login_failure(username):
     if not username:
         return
+    if users.PG_MODE:
+        from munshi.pg.services import user_service as pg_users
+        return pg_users.record_login_failure(username)
+
     import app as _app
 
     conn = _app.get_db()
@@ -97,6 +111,10 @@ def record_login_failure(username):
 def clear_login_failures(username):
     if not username:
         return
+    if users.PG_MODE:
+        from munshi.pg.services import user_service as pg_users
+        return pg_users.clear_login_failures(username)
+
     import app as _app
 
     conn = _app.get_db()
