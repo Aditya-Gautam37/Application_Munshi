@@ -21,7 +21,7 @@ from munshi.pg.models import LedgerEntry
 from munshi.pg.services.payment_service import auto_payment_remove, auto_payment_upsert
 
 _ENTRY_FIELDS = (
-    'entry_date', 'gr_no', 'vehicle_no', 'station', 'shipment_no', 'trip_type',
+    'challan_id', 'entry_date', 'gr_no', 'vehicle_no', 'station', 'shipment_no', 'trip_type',
     'mt_qty', 'freight', 'advance_cash', 'advance_account', 'diesel',
     'diesel_vendor_id', 'transporter_id', 'remarks',
 )

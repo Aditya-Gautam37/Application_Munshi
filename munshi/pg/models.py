@@ -311,10 +311,14 @@ class Challan(Base):
     driver_name: Mapped[str | None] = mapped_column(Text)
     driver_mobile: Mapped[str | None] = mapped_column(Text)
     truck_no: Mapped[str | None] = mapped_column(Text)
-    gate_in_time: Mapped[object | None] = mapped_column(DateTime(timezone=True))
-    gate_out_time: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    # Text, not DateTime: the AI extraction prompt fills these with
+    # free-form handwriting-derived text ("10:30 AM", often blank), not
+    # parseable timestamps. Was originally modeled as DateTime(timezone=True)
+    # -- fixed in migration 0004 before any challan data existed in Postgres.
+    gate_in_time: Mapped[str | None] = mapped_column(Text)
+    gate_out_time: Mapped[str | None] = mapped_column(Text)
     lane_transit_time: Mapped[str | None] = mapped_column(Text)
-    expected_arrival: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    expected_arrival: Mapped[str | None] = mapped_column(Text)
     source_image: Mapped[str | None] = mapped_column(Text)  # Supabase Storage object key
     raw_extraction: Mapped[dict | None] = mapped_column(JSONB)
     confidence_json: Mapped[dict | None] = mapped_column(JSONB)
@@ -419,3 +423,161 @@ class AuditLog(Base):
     entity_id: Mapped[int | None] = mapped_column(BigInteger)
     summary: Mapped[str | None] = mapped_column(Text)
     changes: Mapped[dict | None] = mapped_column(JSONB)
+
+
+# ── Recycle Bin archive tables ────────────────────────────────────────────────
+# SQLite's version (_ensure_archive_table(), app.py) dynamically clones
+# whatever columns the live table currently has via `CREATE TABLE AS SELECT
+# * FROM src WHERE 0` -- no such runtime introspection exists on the
+# Postgres/Alembic side, so each archive table is an explicit, hand-mirrored
+# copy of its live table's columns instead, kept in sync by hand going
+# forward (same discipline as every other model here). `id` is NOT
+# autoincrement -- it's assigned the archived row's original id verbatim
+# (INSERT INTO x_archive SELECT ... FROM x WHERE id=?), and restore reverses
+# that exactly, so a live INSERT-with-identity would only get in the way.
+# No FK constraints to sibling business tables (ledger_entries, bills,
+# challans, transporters, diesel_vendors) -- an archived row's cross-references
+# may point at rows that no longer exist in the live table (the row being
+# archived is itself being removed from that relational graph); only the
+# organization_id FK is kept, matching every other table's tenant-scoping.
+
+class BillArchive(Base):
+    __tablename__ = 'bills_archive'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False)
+    bill_no: Mapped[str] = mapped_column(Text, nullable=False)
+    bill_date: Mapped[object | None] = mapped_column(Date)
+    recipient_name: Mapped[str | None] = mapped_column(Text)
+    recipient_address: Mapped[str | None] = mapped_column(Text)
+    recipient_gstin: Mapped[str | None] = mapped_column(Text)
+    state_code: Mapped[str | None] = mapped_column(Text)
+    trip_type: Mapped[str | None] = mapped_column(Text)
+    vehicle_no: Mapped[str | None] = mapped_column(Text)
+    freight_type: Mapped[str | None] = mapped_column(Text)
+    delivery_month: Mapped[str | None] = mapped_column(Text)
+    client_name: Mapped[str | None] = mapped_column(Text)
+    total_amount: Mapped[float | None] = mapped_column(Numeric)
+    deliveries: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    ledger_entry_id: Mapped[int | None] = mapped_column(BigInteger)
+    client_paid: Mapped[bool | None] = mapped_column(Boolean)
+    client_paid_date: Mapped[object | None] = mapped_column(Date)
+    client_paid_amount: Mapped[float | None] = mapped_column(Numeric)
+    client_paid_mode: Mapped[str | None] = mapped_column(Text)
+    client_paid_reference: Mapped[str | None] = mapped_column(Text)
+    hsn_sac: Mapped[str | None] = mapped_column(Text)
+    taxable_value: Mapped[float | None] = mapped_column(Numeric)
+    reverse_charge: Mapped[bool | None] = mapped_column(Boolean)
+    place_of_supply: Mapped[str | None] = mapped_column(Text)
+    igst_pct: Mapped[float | None] = mapped_column(Numeric)
+    cgst_pct: Mapped[float | None] = mapped_column(Numeric)
+    sgst_pct: Mapped[float | None] = mapped_column(Numeric)
+    igst_amount: Mapped[float | None] = mapped_column(Numeric)
+    cgst_amount: Mapped[float | None] = mapped_column(Numeric)
+    sgst_amount: Mapped[float | None] = mapped_column(Numeric)
+    irn: Mapped[str | None] = mapped_column(Text)
+    irn_qr: Mapped[str | None] = mapped_column(Text)
+
+
+class ChallanArchive(Base):
+    __tablename__ = 'challans_archive'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False)
+    lr_no: Mapped[str | None] = mapped_column(Text)
+    challan_date: Mapped[object | None] = mapped_column(Date)
+    consignor_name: Mapped[str | None] = mapped_column(Text)
+    consignor_address: Mapped[str | None] = mapped_column(Text)
+    consignee_name: Mapped[str | None] = mapped_column(Text)
+    consignee_address: Mapped[str | None] = mapped_column(Text)
+    from_city_state: Mapped[str | None] = mapped_column(Text)
+    to_city_state: Mapped[str | None] = mapped_column(Text)
+    invoice_no: Mapped[str | None] = mapped_column(Text)
+    invoice_date: Mapped[object | None] = mapped_column(Date)
+    consignment_value: Mapped[float | None] = mapped_column(Numeric)
+    gst_number: Mapped[str | None] = mapped_column(Text)
+    no_of_articles: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    value_of_goods: Mapped[float | None] = mapped_column(Numeric)
+    weight_kg: Mapped[float | None] = mapped_column(Numeric)
+    del_no: Mapped[str | None] = mapped_column(Text)
+    shipment_no: Mapped[str | None] = mapped_column(Text)
+    cost_no: Mapped[str | None] = mapped_column(Text)
+    seal_no: Mapped[str | None] = mapped_column(Text)
+    driver_name: Mapped[str | None] = mapped_column(Text)
+    driver_mobile: Mapped[str | None] = mapped_column(Text)
+    truck_no: Mapped[str | None] = mapped_column(Text)
+    gate_in_time: Mapped[str | None] = mapped_column(Text)
+    gate_out_time: Mapped[str | None] = mapped_column(Text)
+    lane_transit_time: Mapped[str | None] = mapped_column(Text)
+    expected_arrival: Mapped[str | None] = mapped_column(Text)
+    source_image: Mapped[str | None] = mapped_column(Text)
+    raw_extraction: Mapped[dict | None] = mapped_column(JSONB)
+    confidence_json: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    ledger_entry_id: Mapped[int | None] = mapped_column(BigInteger)
+    pod_doc_no: Mapped[str | None] = mapped_column(Text)
+    invoice_source_image: Mapped[str | None] = mapped_column(Text)
+    invoice_raw_extraction: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class LedgerEntryArchive(Base):
+    __tablename__ = 'ledger_entries_archive'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False)
+    challan_id: Mapped[int | None] = mapped_column(BigInteger)
+    entry_date: Mapped[object | None] = mapped_column(Date)
+    gr_no: Mapped[str | None] = mapped_column(Text)
+    vehicle_no: Mapped[str | None] = mapped_column(Text)
+    station: Mapped[str | None] = mapped_column(Text)
+    shipment_no: Mapped[str | None] = mapped_column(Text)
+    trip_type: Mapped[str | None] = mapped_column(Text)
+    mt_qty: Mapped[float | None] = mapped_column(Numeric)
+    freight: Mapped[float | None] = mapped_column(Numeric)
+    advance_cash: Mapped[float | None] = mapped_column(Numeric)
+    advance_account: Mapped[float | None] = mapped_column(Numeric)
+    diesel: Mapped[float | None] = mapped_column(Numeric)
+    diesel_vendor_id: Mapped[int | None] = mapped_column(BigInteger)
+    transporter_id: Mapped[int | None] = mapped_column(BigInteger)
+    shortage: Mapped[float | None] = mapped_column(Numeric)
+    leakage: Mapped[float | None] = mapped_column(Numeric)
+    breakage: Mapped[float | None] = mapped_column(Numeric)
+    unloading: Mapped[float | None] = mapped_column(Numeric)
+    detention: Mapped[float | None] = mapped_column(Numeric)
+    toll_tax: Mapped[float | None] = mapped_column(Numeric)
+    excess_km: Mapped[float | None] = mapped_column(Numeric)
+    pod_received: Mapped[bool | None] = mapped_column(Boolean)
+    pod_date: Mapped[object | None] = mapped_column(Date)
+    pod_image: Mapped[str | None] = mapped_column(Text)
+    paid: Mapped[bool | None] = mapped_column(Boolean)
+    paid_date: Mapped[object | None] = mapped_column(Date)
+    paid_mode: Mapped[str | None] = mapped_column(Text)
+    paid_amount: Mapped[float | None] = mapped_column(Numeric)
+    paid_reference: Mapped[str | None] = mapped_column(Text)
+    remarks: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    bill_id: Mapped[int | None] = mapped_column(BigInteger)
+    weight_kg: Mapped[float | None] = mapped_column(Numeric)
+
+
+class PaymentArchive(Base):
+    __tablename__ = 'payments_archive'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='CASCADE'), nullable=False)
+    party_type: Mapped[str] = mapped_column(Text, nullable=False)
+    party_key: Mapped[str] = mapped_column(Text, nullable=False)
+    payment_date: Mapped[object] = mapped_column(Date, nullable=False)
+    amount: Mapped[float] = mapped_column(Numeric, nullable=False)
+    mode: Mapped[str | None] = mapped_column(Text)
+    reference: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(Text)

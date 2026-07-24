@@ -2636,12 +2636,15 @@ def new_bill():
             # Bill numbering, GST split (compute_gst_split, called inside
             # create_bill — same function, not re-implemented), and the
             # bill<->ledger link all happen in Postgres via the already-
-            # tested bill_service. remember_recipient/remember_vehicle and
-            # log_audit are deliberately left on the SQLite `conn` below —
-            # out of this round's scope (autocomplete memory) or explicitly
-            # deferred (audit trail), same as the auth domain.
+            # tested bill_service. remember_recipient/remember_vehicle stay
+            # on the SQLite `conn` below — out of this round's scope
+            # (autocomplete memory). Audit now logs to BOTH Postgres (via
+            # audit_service, the real fix) and SQLite (the trailing
+            # log_audit(conn, ...) call further down, left in place rather
+            # than removed — harmless duplication, not a correctness issue).
             from datetime import date as _date
             from munshi.pg import database as _pg_database
+            from munshi.pg.services import audit_service as _pg_audit
             from munshi.pg.services import bill_service as _pg_bills
             try:
                 bill_date_parsed = _date.fromisoformat(bill_date_val) if bill_date_val else None
@@ -2668,6 +2671,9 @@ def new_bill():
                 supplier_state=supplier_state,
                 from_ledger_id=from_le_id,
             )
+            _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'bill', bill.id,
+                                summary=f'Created bill {bill.bill_no} for {recipient_name_val} · ₹{float(bill.total_amount):,.2f}',
+                                user=current_user())
             pg_session.commit()
             bill_id, bill_no, total = bill.id, bill.bill_no, float(bill.total_amount)
         else:
@@ -4541,6 +4547,11 @@ def remember_driver(conn, name, mobile):
 
 
 def get_drivers():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import driver_service as _pg_drivers
+        pg_session = _pg_database.get_session()
+        return [{'mobile': d.mobile, 'name': d.name} for d in _pg_drivers.list_drivers(pg_session, ORG_ID)]
     conn = get_db()
     rows = conn.execute('SELECT mobile, name FROM drivers ORDER BY updated_at DESC').fetchall()
     conn.close()
@@ -4573,6 +4584,27 @@ def find_unique_lr_no(conn, preferred=''):
 
 @app.route('/challans')
 def challans_index():
+    if PG_MODE:
+        from decimal import Decimal as _Decimal
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import challan_service as _pg_challans
+        pg_session = _pg_database.get_session()
+        rows = _pg_challans.list_challans(pg_session, ORG_ID)
+        if not rows:
+            # Photo-upload challan creation isn't migrated yet (needs the
+            # Storage integration, next in this phase) — still SQLite until
+            # then, so this empty-state redirect is unchanged for now.
+            return redirect(url_for('challan_extract_upload'))
+        challans = []
+        for c in rows:
+            challans.append({
+                'id': c.id, 'lr_no': c.lr_no, 'challan_date': c.challan_date,
+                'consignor_name': c.consignor_name, 'consignee_name': c.consignee_name,
+                'truck_no': c.truck_no, 'driver_name': c.driver_name, 'status': c.status,
+                'weight_kg': float(c.weight_kg) if isinstance(c.weight_kg, _Decimal) else c.weight_kg,
+            })
+        return render_template('challans_index.html', challans=challans)
+
     conn = get_db()
     rows = conn.execute(
         '''SELECT id, lr_no, challan_date, consignor_name, consignee_name,
@@ -4593,6 +4625,14 @@ def challan_new_manual():
     """Start a blank challan with no photo/AI step — reuses the same draft
        review/edit screen (challan_review) that photo extraction lands on,
        just with every field empty instead of AI-prefilled."""
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import challan_service as _pg_challans
+        pg_session = _pg_database.get_session()
+        challan = _pg_challans.create_draft(pg_session, ORG_ID)
+        pg_session.commit()
+        return redirect(url_for('challan_review', challan_id=challan.id))
+
     conn = get_db()
     lr_no_val = find_unique_lr_no(conn)
     conn.execute('''
@@ -4731,6 +4771,77 @@ def _safe_num(v):
 
 @app.route('/challan/<int:challan_id>', methods=['GET', 'POST'])
 def challan_review(challan_id):
+    if PG_MODE:
+        from decimal import Decimal as _Decimal
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import challan_service as _pg_challans
+        from munshi.pg.services import driver_service as _pg_drivers
+        pg_session = _pg_database.get_session()
+
+        if request.method == 'POST':
+            f = request.form
+            lr_val = (f.get('lr_no') or '').strip()
+            truck_no_val = (f.get('truck_no') or '').upper().replace(' ', '')
+            fields = dict(
+                lr_no=lr_val, challan_date=f.get('challan_date') or None,
+                consignor_name=f.get('consignor_name'), consignor_address=f.get('consignor_address'),
+                consignee_name=f.get('consignee_name'), consignee_address=f.get('consignee_address'),
+                from_city_state=f.get('from_city_state'), to_city_state=f.get('to_city_state'),
+                invoice_no=f.get('invoice_no'), invoice_date=f.get('invoice_date') or None,
+                consignment_value=_safe_num(f.get('consignment_value')), gst_number=f.get('gst_number'),
+                no_of_articles=f.get('no_of_articles'), description=f.get('description'),
+                value_of_goods=_safe_num(f.get('value_of_goods')), weight_kg=_safe_num(f.get('weight_kg')),
+                del_no=f.get('del_no'), pod_doc_no=f.get('pod_doc_no'),
+                shipment_no=f.get('shipment_no'), cost_no=f.get('cost_no'), seal_no=f.get('seal_no'),
+                driver_name=f.get('driver_name'), driver_mobile=f.get('driver_mobile'),
+                truck_no=truck_no_val,
+                gate_in_time=f.get('gate_in_time'), gate_out_time=f.get('gate_out_time'),
+                lane_transit_time=f.get('lane_transit_time'), expected_arrival=f.get('expected_arrival'),
+            )
+            challan, new_entry = _pg_challans.update_challan(pg_session, ORG_ID, challan_id, **fields)
+            if challan is None:
+                pg_session.rollback()
+                return 'Challan not found', 404
+
+            _pg_drivers.get_or_create_driver(pg_session, ORG_ID, f.get('driver_name'), f.get('driver_mobile'))
+            _veh_conn = get_db()
+            remember_vehicle(_veh_conn, truck_no_val)
+            _veh_conn.commit()
+            _veh_conn.close()
+
+            action_type = 'create' if new_entry is not None else 'update'
+            _pg_audit.log_audit(
+                pg_session, ORG_ID, action_type, 'challan', challan_id,
+                summary=f'{"Created" if action_type == "create" else "Edited"} challan LR-{lr_val} → {f.get("consignee_name") or ""}',
+                user=current_user(),
+            )
+            if new_entry is not None:
+                _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'ledger_entry', new_entry.id,
+                                    summary=f'Auto-created from challan LR-{lr_val}', user=current_user())
+
+            pg_session.commit()
+            flash(f'Challan LR-{lr_val} saved. Ledger draft created — fill in money in the Ledger.')
+            return redirect(url_for('challans_index'))
+
+        challan_row = _pg_challans.get_challan(pg_session, ORG_ID, challan_id)
+        if challan_row is None:
+            return 'Challan not found', 404
+        challan = {c.name: getattr(challan_row, c.name) for c in challan_row.__table__.columns}
+        challan = {k: (float(v) if isinstance(v, _Decimal) else v) for k, v in challan.items()}
+        challan['confidence'] = challan.get('confidence_json') or {}
+        audit_rows = _pg_audit.get_audit_for(pg_session, ORG_ID, 'challan', challan_id)
+        audit_entries = [
+            {'occurred_at': a.occurred_at, 'user_name': a.user_name, 'action': a.action,
+             'entity': a.entity, 'entity_id': a.entity_id, 'summary': a.summary, 'changes': a.changes}
+            for a in audit_rows
+        ]
+        return render_template('challan_review.html',
+                               challan=challan,
+                               drivers=get_drivers(),
+                               vehicles=get_vehicles(),
+                               audit_entries=audit_entries)
+
     conn = get_db()
     row = conn.execute('SELECT * FROM challans WHERE id=?', (challan_id,)).fetchone()
     if not row:
@@ -4949,14 +5060,17 @@ def transporter_add():
     if PG_MODE:
         from sqlalchemy.exc import IntegrityError as _PgIntegrityError
         from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
         from munshi.pg.services import transporter_service as _pg_transporters
         pg_session = _pg_database.get_session()
         try:
-            _pg_transporters.create_transporter(
+            transporter = _pg_transporters.create_transporter(
                 pg_session, ORG_ID, name,
                 mobile=f.get('mobile') or '', bank_details=f.get('bank_details') or '',
                 notes=f.get('notes') or '',
             )
+            _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'transporter', transporter.id,
+                                summary=f'Added transporter "{name}"', user=current_user())
             pg_session.commit()
             flash(f'Transporter "{name}" added.')
         except _PgIntegrityError:
@@ -4986,9 +5100,12 @@ def transporter_add():
 def transporter_delete(tid):
     if PG_MODE:
         from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
         from munshi.pg.services import transporter_service as _pg_transporters
         pg_session = _pg_database.get_session()
-        _pg_transporters.delete_transporter(pg_session, ORG_ID, tid)
+        deleted_name = _pg_transporters.delete_transporter(pg_session, ORG_ID, tid)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'transporter', tid,
+                            summary=f'Removed transporter "{deleted_name or f"#{tid}"}"', user=current_user())
         pg_session.commit()
         flash('Transporter removed.')
         return redirect(url_for('masters_index'))
@@ -5542,10 +5659,11 @@ def ledger_paid(le_id):
 
     if PG_MODE:
         from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
         from munshi.pg.services import ledger_service as _pg_ledger
         pg_session = _pg_database.get_session()
         try:
-            _pg_ledger.mark_ledger_paid(
+            entry = _pg_ledger.mark_ledger_paid(
                 pg_session, ORG_ID, le_id, is_paid=bool(is_paid),
                 paid_date=f.get('paid_date') or None, paid_mode=f.get('paid_mode'),
                 paid_amount=_safe_num(f.get('paid_amount')), paid_reference=f.get('paid_reference'),
@@ -5555,6 +5673,9 @@ def ledger_paid(le_id):
             pg_session.rollback()
             flash('Ledger entry not found.')
             return redirect(url_for('ledger_index'))
+        action = 'Marked paid' if is_paid else 'Un-marked paid'
+        _pg_audit.log_audit(pg_session, ORG_ID, 'paid_mark', 'ledger_entry', le_id,
+                            summary=f'{action} for GR-{entry.gr_no or le_id}', user=current_user())
         pg_session.commit()
         flash('Payment status updated.')
         return redirect(url_for('ledger_view', le_id=le_id))
@@ -6469,14 +6590,20 @@ def payment_add():
 
     if PG_MODE:
         from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
         from munshi.pg.services import payment_service as _pg_payments
         pg_session = _pg_database.get_session()
-        _pg_payments.record_manual_payment(
+        payment = _pg_payments.record_manual_payment(
             pg_session, ORG_ID, party_type, party_key, amount,
             payment_date=f.get('payment_date') or None,
             mode=f.get('mode'), reference=f.get('reference'), notes=f.get('notes'),
             created_by=current_user(),
         )
+        direction = 'received from' if party_type == 'client' else 'paid to'
+        _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'payment', payment.id,
+                            summary=f'₹{amount:,.2f} {direction} {party_type} {party_key}'
+                                    + (f' ({f.get("mode")})' if f.get('mode') else ''),
+                            user=current_user())
         pg_session.commit()
     else:
         conn = get_db()
