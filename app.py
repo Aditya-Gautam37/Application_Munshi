@@ -2778,22 +2778,34 @@ def new_bill():
 def _build_prefill_from_extraction(ext_id):
     """Read all extracted_invoices for this extraction and build a (bill_dict, deliveries_list)
        suitable for new_bill.html (which already supports an 'edit' / 'bill' object)."""
-    conn = get_db()
-    extraction = conn.execute('SELECT * FROM extractions WHERE id=?', (ext_id,)).fetchone()
-    invs = conn.execute(
-        'SELECT * FROM extracted_invoices WHERE extraction_id=? ORDER BY seq',
-        (ext_id,)
-    ).fetchall()
-    conn.close()
-    if not extraction or not invs:
-        return None, []
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import extraction_service as _pg_extract
+        pg_session = _pg_database.get_session()
+        extraction = _pg_extract.get_extraction(pg_session, ORG_ID, ext_id)
+        invs = _pg_extract.list_extracted_invoices(pg_session, ORG_ID, ext_id)
+        if not extraction or not invs:
+            return None, []
+        parsed_invs = [inv.edited_json or inv.raw_json or {} for inv in invs]
+        parsed_invs = [p for p in parsed_invs if p]
+        extraction = {'mode': extraction.mode}
+    else:
+        conn = get_db()
+        extraction = conn.execute('SELECT * FROM extractions WHERE id=?', (ext_id,)).fetchone()
+        invs = conn.execute(
+            'SELECT * FROM extracted_invoices WHERE extraction_id=? ORDER BY seq',
+            (ext_id,)
+        ).fetchall()
+        conn.close()
+        if not extraction or not invs:
+            return None, []
 
-    parsed_invs = []
-    for inv in invs:
-        try:
-            parsed_invs.append(json.loads(inv['edited_json'] or inv['raw_json'] or '{}'))
-        except Exception:
-            pass
+        parsed_invs = []
+        for inv in invs:
+            try:
+                parsed_invs.append(json.loads(inv['edited_json'] or inv['raw_json'] or '{}'))
+            except Exception:
+                pass
     if not parsed_invs:
         return None, []
 
@@ -4136,23 +4148,41 @@ def extract_vbl_invoice(file_path):
 
 # ─── /extract — upload page + handler ─────────────────────────────────────────
 
-def _run_extraction_async(ext_id, saved_files):
+def _run_extraction_async(ext_id, saved_files, pg_org_id=None):
     """Background worker: calls Gemini for each saved file, updates progress on
        the extractions row, and inserts results into extracted_invoices.
-       Runs in a daemon thread; uses its own DB connection (sqlite3 doesn't
-       share connections across threads)."""
+       Runs in a daemon thread. Still a real background thread in PG_MODE too
+       — Render is a persistent container, not serverless, so nothing here
+       needs redesigning for timeouts the way a Vercel deploy would have
+       forced (see .claude/plans/streamed-giggling-crescent.md).
+
+       `saved_files` is (rel_name, full_path) pairs in SQLite mode — in
+       PG_MODE, `pg_org_id` is set and `saved_files` is (storage_key,
+       storage_key) pairs instead (no local full_path exists yet; each file
+       is downloaded from Supabase Storage into a throwaway temp file per
+       iteration, matching the "own DB connection per touch" discipline the
+       SQLite version already uses since neither sqlite3 connections nor
+       these Postgres sessions are meant to be shared across threads)."""
+    import tempfile
     import time
     total = len(saved_files)
     # Free-tier quota guardrail kept for parity; on paid tier this no-ops effectively.
     throttle_seconds = 13 if total >= 5 else 0
 
     def write(note):
-        c = get_db()
-        try:
-            c.execute('UPDATE extractions SET note=? WHERE id=?', (note, ext_id))
-            c.commit()
-        finally:
-            c.close()
+        if pg_org_id:
+            from munshi.pg import database as _pg_database
+            from munshi.pg.services import extraction_service as _pg_extract
+            s = _pg_database.get_session()
+            _pg_extract.update_extraction(s, pg_org_id, ext_id, note=note)
+            s.commit()
+        else:
+            c = get_db()
+            try:
+                c.execute('UPDATE extractions SET note=? WHERE id=?', (note, ext_id))
+                c.commit()
+            finally:
+                c.close()
 
     # Bound how many extraction jobs actively call Gemini (and hold decoded
     # images in memory) at once — see _EXTRACTION_SLOTS. If every slot is
@@ -4169,37 +4199,81 @@ def _run_extraction_async(ext_id, saved_files):
                 write(f'Reading file {seq} of {total}…')
                 if seq > 1 and throttle_seconds:
                     time.sleep(throttle_seconds)
-                result = extract_vbl_invoice(full_path)
+
+                if pg_org_id:
+                    from munshi.pg import storage as _pg_storage
+                    data = _pg_storage.download_bytes(rel_name)
+                    suffix = Path(rel_name).suffix
+                    tmp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                            tmp.write(data)
+                            tmp_path = tmp.name
+                        result = extract_vbl_invoice(tmp_path)
+                    finally:
+                        if tmp_path:
+                            os.remove(tmp_path)
+                else:
+                    result = extract_vbl_invoice(full_path)
+
+                if pg_org_id:
+                    from munshi.pg import database as _pg_database
+                    from munshi.pg.services import extraction_service as _pg_extract
+                    s = _pg_database.get_session()
+                    _pg_extract.add_extracted_invoice(
+                        s, pg_org_id, ext_id, rel_name, seq,
+                        raw_json=(result['data'] if result['ok'] else result['raw']),
+                        error=result.get('error'),
+                    )
+                    s.commit()
+                else:
+                    c = get_db()
+                    try:
+                        c.execute(
+                            '''INSERT INTO extracted_invoices
+                               (extraction_id, file_name, seq, raw_json, error)
+                               VALUES (?,?,?,?,?)''',
+                            (ext_id, rel_name, seq,
+                             json.dumps(result['data']) if result['ok'] else result['raw'],
+                             result.get('error'))
+                        )
+                        c.commit()
+                    finally:
+                        c.close()
+            write('Done')
+            if pg_org_id:
+                from munshi.pg import database as _pg_database
+                from munshi.pg.services import extraction_service as _pg_extract
+                s = _pg_database.get_session()
+                _pg_extract.update_extraction(s, pg_org_id, ext_id, status='extracted')
+                s.commit()
+            else:
                 c = get_db()
                 try:
-                    c.execute(
-                        '''INSERT INTO extracted_invoices
-                           (extraction_id, file_name, seq, raw_json, error)
-                           VALUES (?,?,?,?,?)''',
-                        (ext_id, rel_name, seq,
-                         json.dumps(result['data']) if result['ok'] else result['raw'],
-                         result.get('error'))
-                    )
+                    c.execute('UPDATE extractions SET status=? WHERE id=?', ('extracted', ext_id))
                     c.commit()
                 finally:
                     c.close()
-            write('Done')
-            c = get_db()
-            try:
-                c.execute('UPDATE extractions SET status=? WHERE id=?', ('extracted', ext_id))
-                c.commit()
-            finally:
-                c.close()
         except Exception as e:
-            c = get_db()
-            try:
-                c.execute('UPDATE extractions SET status=?, note=? WHERE id=?',
-                          ('failed', f'Error: {e}'[:500], ext_id))
-                c.commit()
-            finally:
-                c.close()
+            if pg_org_id:
+                from munshi.pg import database as _pg_database
+                from munshi.pg.services import extraction_service as _pg_extract
+                s = _pg_database.get_session()
+                _pg_extract.update_extraction(s, pg_org_id, ext_id, status='failed', note=f'Error: {e}'[:500])
+                s.commit()
+            else:
+                c = get_db()
+                try:
+                    c.execute('UPDATE extractions SET status=?, note=? WHERE id=?',
+                              ('failed', f'Error: {e}'[:500], ext_id))
+                    c.commit()
+                finally:
+                    c.close()
     finally:
         _EXTRACTION_SLOTS.release()
+        if pg_org_id:
+            from munshi.pg import database as _pg_database
+            _pg_database.remove_session()
 
 
 @app.route('/extract', methods=['GET', 'POST'])
@@ -4221,6 +4295,36 @@ def extract_upload():
             if ext not in ALLOWED_EXTS:
                 flash(f'Unsupported file type: {f.filename}. Use JPG, PNG, PDF.')
                 return redirect(url_for('extract_upload'))
+
+        if PG_MODE:
+            from munshi.pg import database as _pg_database
+            from munshi.pg import storage as _pg_storage
+            from munshi.pg.services import extraction_service as _pg_extract
+            pg_session = _pg_database.get_session()
+            extraction = _pg_extract.create_extraction(
+                pg_session, ORG_ID, mode='combine', status='pending',
+                note=f'Queued — uploading {len(files)} file(s)',
+            )
+            pg_session.commit()
+            ext_id = extraction.id
+
+            # Upload all files to Storage synchronously (fast), then dispatch
+            # the AI work to a background thread — same "fast save, then
+            # redirect immediately" shape as the SQLite path, just to
+            # Storage instead of local disk.
+            saved_files = []
+            for seq, f in enumerate(files, start=1):
+                key = f'{ORG_ID}/extractions/{ext_id}/{seq:02d}_{uuid.uuid4().hex[:8]}{Path(f.filename).suffix.lower()}'
+                _pg_storage.upload_bytes(key, f.read(), content_type=f.mimetype or 'application/octet-stream')
+                saved_files.append((key, key))
+
+            import threading
+            t = threading.Thread(target=_run_extraction_async,
+                                 args=(ext_id, saved_files),
+                                 kwargs={'pg_org_id': ORG_ID},
+                                 daemon=True)
+            t.start()
+            return redirect(url_for('extract_review', extraction_id=ext_id))
 
         # Create extraction record (status='pending', progress note set)
         conn = get_db()
@@ -4263,6 +4367,21 @@ def extract_upload():
 def extract_status(extraction_id):
     """JSON status endpoint polled by the extract_review page while extraction
        is still running in the background."""
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import extraction_service as _pg_extract
+        pg_session = _pg_database.get_session()
+        extraction = _pg_extract.get_extraction(pg_session, ORG_ID, extraction_id)
+        if extraction is None:
+            return jsonify({'status': 'not_found'}), 404
+        total = _pg_extract.count_extracted_invoices(pg_session, ORG_ID, extraction_id)
+        return jsonify({
+            'status': extraction.status,
+            'note': extraction.note or '',
+            'files_done': total,
+            'created_at': extraction.created_at.isoformat() if extraction.created_at else None,
+        })
+
     conn = get_db()
     row = conn.execute('SELECT status, note, created_at FROM extractions WHERE id=?',
                        (extraction_id,)).fetchone()
@@ -4283,6 +4402,57 @@ def extract_status(extraction_id):
 
 @app.route('/extract/<int:extraction_id>', methods=['GET', 'POST'])
 def extract_review(extraction_id):
+    if PG_MODE:
+        from decimal import Decimal as _Decimal
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import extraction_service as _pg_extract
+        pg_session = _pg_database.get_session()
+        extraction = _pg_extract.get_extraction(pg_session, ORG_ID, extraction_id)
+        if extraction is None:
+            flash('Extraction not found.')
+            return redirect(url_for('extract_upload'))
+
+        if extraction.status in ('pending', 'failed'):
+            return render_template('extract_processing.html', extraction={
+                'id': extraction.id, 'status': extraction.status, 'note': extraction.note,
+                'mode': extraction.mode, 'created_at': extraction.created_at,
+            })
+
+        invs = _pg_extract.list_extracted_invoices(pg_session, ORG_ID, extraction_id)
+
+        if request.method == 'POST':
+            mode = request.form.get('mode', 'combine')
+            for inv in invs:
+                edited = {}
+                prefix = f'inv_{inv.id}_'
+                for key in ['doc_no', 'date',
+                            'consignor_name', 'consignor_address', 'consignor_gstin',
+                            'consignee_name', 'consignee_address',
+                            'consignee_gstin', 'consignee_mobile', 'vehicle_reg_no',
+                            'truck_capacity', 'trip_type', 'transporter',
+                            'total_weight_kg', 'total_quantity', 'quantity_unit']:
+                    edited[key] = request.form.get(prefix + key, '').strip()
+                _pg_extract.update_extracted_invoice_edited(pg_session, ORG_ID, inv.id, edited)
+            _pg_extract.update_extraction(pg_session, ORG_ID, extraction_id, mode=mode, status='reviewed')
+            pg_session.commit()
+            return redirect(url_for('new_bill', from_extraction=extraction_id))
+
+        def _num(v):
+            return float(v) if isinstance(v, _Decimal) else v
+
+        invoices = []
+        for inv in invs:
+            d = {c.name: getattr(inv, c.name) for c in inv.__table__.columns}
+            d = {k: (_num(v) if isinstance(v, _Decimal) else v) for k, v in d.items()}
+            d['parsed'] = d.get('edited_json') or d.get('raw_json') or {}
+            invoices.append(d)
+        return render_template('extract_review.html',
+                               extraction={'id': extraction.id, 'status': extraction.status,
+                                          'mode': extraction.mode, 'note': extraction.note,
+                                          'created_at': extraction.created_at},
+                               invoices=invoices,
+                               default_consignor=get_setting('default_consignor_name') or '')
+
     conn = get_db()
     extraction = conn.execute(
         'SELECT * FROM extractions WHERE id=?', (extraction_id,)
@@ -4344,6 +4514,14 @@ def extract_review(extraction_id):
 
 @app.route('/uploads/<path:filename>')
 def serve_upload(filename):
+    # PG_MODE-created files live in Supabase Storage under an org-id
+    # prefix (see munshi/pg/storage.py) — a Storage key always starts with
+    # ORG_ID, which a local-disk-relative path (e.g. "42/01_abcd1234.jpg")
+    # never does, so this distinguishes the two without needing a separate
+    # route/URL scheme for each.
+    if PG_MODE and ORG_ID and filename.startswith(f'{ORG_ID}/'):
+        from munshi.pg import storage as _pg_storage
+        return redirect(_pg_storage.get_signed_url(filename))
     return send_from_directory(UPLOAD_DIR, filename)
 
 
@@ -5128,6 +5306,26 @@ def diesel_vendor_add():
     if not name:
         flash('Vendor name required.')
         return redirect(url_for('masters_index'))
+
+    if PG_MODE:
+        from sqlalchemy.exc import IntegrityError as _PgIntegrityError
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import diesel_vendor_service as _pg_diesel
+        pg_session = _pg_database.get_session()
+        try:
+            vendor = _pg_diesel.create_diesel_vendor(
+                pg_session, ORG_ID, name, location=f.get('location') or '', notes=f.get('notes') or '',
+            )
+            _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'diesel_vendor', vendor.id,
+                                summary=f'Added diesel vendor "{name}"', user=current_user())
+            pg_session.commit()
+            flash(f'Diesel vendor "{name}" added.')
+        except _PgIntegrityError:
+            pg_session.rollback()
+            flash(f'Vendor "{name}" already exists.')
+        return redirect(url_for('masters_index'))
+
     conn = get_db()
     try:
         conn.execute(
@@ -5148,6 +5346,18 @@ def diesel_vendor_add():
 
 @app.route('/masters/diesel-vendor/<int:vid>/delete', methods=['POST'])
 def diesel_vendor_delete(vid):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import diesel_vendor_service as _pg_diesel
+        pg_session = _pg_database.get_session()
+        deleted_name = _pg_diesel.delete_diesel_vendor(pg_session, ORG_ID, vid)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'diesel_vendor', vid,
+                            summary=f'Removed diesel vendor "{deleted_name or f"#{vid}"}"', user=current_user())
+        pg_session.commit()
+        flash('Diesel vendor removed.')
+        return redirect(url_for('masters_index'))
+
     conn = get_db()
     row = conn.execute('SELECT name FROM diesel_vendors WHERE id=?', (vid,)).fetchone()
     name = row['name'] if row else f'#{vid}'
