@@ -7,6 +7,7 @@
 
 {{ page_header(t('Dashboard'), t('Overview of operations, money and what needs attention')) }}
 
+{% if vault %}
 <!-- ── Data Vault: is your data safely backed up on THIS laptop? ── -->
 {% set vault_bad = vault.stale or vault.error %}
 <div class="jl-card mb-4" style="border-left:4px solid {{ '#dc3545' if vault_bad else '#198754' }}">
@@ -51,6 +52,7 @@
     </div>
   </div>
 </div>
+{% endif %}
 
 <!-- ── Last 7 days KPI strip ── -->
 <div class="jl-row mb-3" style="font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--jl-text-muted)">

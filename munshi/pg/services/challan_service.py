@@ -1,8 +1,8 @@
 """Challans — port of app.py's challan routes (challans_index,
 challan_new_manual, challan_extract_upload, challan_review). Delete
-(→ recycle bin) is NOT here yet — that's a separate phase, alongside the
-matching bill/ledger/payment delete gaps (see .claude/plans/
-streamed-giggling-crescent.md).
+(→ recycle bin) lives directly in app.py's challan_delete() PG_MODE branch,
+via munshi/pg/services/recycle_bin_service.py — same place as the bill/
+ledger/payment delete routes, not duplicated here.
 
 LR-number allocation uses numbering_service.allocate_number() (the same
 race-free SELECT...FOR UPDATE mechanism already proven for bill numbers)

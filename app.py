@@ -985,6 +985,11 @@ def get_vehicles():
 # ── Freight rate list (uploaded Excel master rates) ────────────────────────────
 
 def get_rate_list():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+        return _pg_rates.get_rate_list(pg_session, ORG_ID)
     conn = get_db()
     rows = conn.execute(
         '''SELECT customer_name, party_code, location, dist_twy_km, dist_owy_km,
@@ -1145,7 +1150,12 @@ def import_rate_list_from_xlsx(xlsx_path):
                 col_map[field] = ci
                 used_cols.add(ci)
 
-    conn = get_db()
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+    else:
+        conn = get_db()
     count = 0
     skipped = 0
     for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
@@ -1173,25 +1183,35 @@ def import_rate_list_from_xlsx(xlsx_path):
             skipped += 1
             continue
 
-        conn.execute(
-            '''INSERT INTO freight_rates
-                 (customer_name, party_code, location, dist_twy_km, dist_owy_km,
-                  lp_owy, lp_twy, trolla_owy, trolla_twy, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(customer_name, location) DO UPDATE SET
-                 party_code=excluded.party_code,
-                 dist_twy_km=excluded.dist_twy_km,
-                 dist_owy_km=excluded.dist_owy_km,
-                 lp_owy=excluded.lp_owy, lp_twy=excluded.lp_twy,
-                 trolla_owy=excluded.trolla_owy, trolla_twy=excluded.trolla_twy,
-                 updated_at=excluded.updated_at''',
-            (name.upper(), party_code, location.upper(),
-             dist_twy, dist_owy, lp_owy, lp_twy, trl_owy, trl_twy,
-             datetime.now().isoformat())
-        )
+        if PG_MODE:
+            _pg_rates.upsert_rate_row(
+                pg_session, ORG_ID, customer_name=name.upper(), party_code=party_code,
+                location=location.upper(), dist_twy_km=dist_twy, dist_owy_km=dist_owy,
+                lp_owy=lp_owy, lp_twy=lp_twy, trolla_owy=trl_owy, trolla_twy=trl_twy,
+            )
+        else:
+            conn.execute(
+                '''INSERT INTO freight_rates
+                     (customer_name, party_code, location, dist_twy_km, dist_owy_km,
+                      lp_owy, lp_twy, trolla_owy, trolla_twy, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(customer_name, location) DO UPDATE SET
+                     party_code=excluded.party_code,
+                     dist_twy_km=excluded.dist_twy_km,
+                     dist_owy_km=excluded.dist_owy_km,
+                     lp_owy=excluded.lp_owy, lp_twy=excluded.lp_twy,
+                     trolla_owy=excluded.trolla_owy, trolla_twy=excluded.trolla_twy,
+                     updated_at=excluded.updated_at''',
+                (name.upper(), party_code, location.upper(),
+                 dist_twy, dist_owy, lp_owy, lp_twy, trl_owy, trl_twy,
+                 datetime.now().isoformat())
+            )
         count += 1
-    conn.commit()
-    conn.close()
+    if PG_MODE:
+        pg_session.commit()
+    else:
+        conn.commit()
+        conn.close()
 
     found_labels = [_RATE_FIELD_LABELS[f] for f in col_map]
     missing = [_RATE_FIELD_LABELS[f] for f in _RATE_FIELD_LABELS if f not in col_map]
@@ -3212,6 +3232,24 @@ def edit_bill(bill_id):
 
 @app.route('/bill/<int:bill_id>/delete', methods=['POST'])
 def delete_bill(bill_id):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Bill, BillArchive
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import recycle_bin_service as _pg_recycle
+        pg_session = _pg_database.get_session()
+        bill = pg_session.get(Bill, bill_id)
+        if bill is None or str(bill.organization_id) != str(ORG_ID):
+            flash('Bill not found.')
+            return redirect(url_for('index'))
+        summary_text = f'Deleted bill {bill.bill_no} ({bill.recipient_name})'
+        _pg_recycle.archive_and_delete(pg_session, ORG_ID, Bill, BillArchive, bill_id)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'bill', bill_id,
+                            summary=summary_text + ' (→ Recycle Bin)', user=current_user())
+        pg_session.commit()
+        flash(t('Bill moved to the Recycle Bin. Restore it from there if this was a mistake.'))
+        return redirect(url_for('index'))
+
     conn = get_db()
     row = conn.execute('SELECT bill_no, recipient_name FROM bills WHERE id=?', (bill_id,)).fetchone()
     if not row:
@@ -3355,6 +3393,15 @@ def upload_rate_list():
 
 @app.route('/settings/rate-list/clear', methods=['POST'])
 def clear_rate_list():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+        _pg_rates.clear_rates(pg_session, ORG_ID)
+        pg_session.commit()
+        flash('Rate list cleared.')
+        return redirect(url_for('settings'))
+
     conn = get_db()
     conn.execute('DELETE FROM freight_rates')
     conn.commit()
@@ -3368,6 +3415,20 @@ def clear_rate_list():
 @app.route('/rate-list')
 def rate_list_editor():
     f = request.args
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+        rows = _pg_rates.search_rates(pg_session, ORG_ID, q=f.get('q') or None)
+        rates = [{
+            'id': r.id, 'customer_name': r.customer_name, 'party_code': r.party_code,
+            'location': r.location, 'dist_twy_km': r.dist_twy_km, 'dist_owy_km': r.dist_owy_km,
+            'lp_owy': r.lp_owy, 'lp_twy': r.lp_twy, 'trolla_owy': r.trolla_owy,
+            'trolla_twy': r.trolla_twy, 'updated_at': r.updated_at,
+        } for r in rows]
+        return render_template('rate_list_editor.html', rates=rates, filters=dict(f))
+
     where, params = ['1=1'], []
     if f.get('q'):
         where.append('(customer_name LIKE ? OR location LIKE ? OR party_code LIKE ?)')
@@ -3389,6 +3450,31 @@ def rate_list_add():
         flash('Customer name required.')
         return redirect(url_for('rate_list_editor'))
     location = (f.get('location') or '').strip().upper()
+
+    if PG_MODE:
+        from sqlalchemy.exc import IntegrityError
+
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+        try:
+            rate = _pg_rates.create_rate(
+                pg_session, ORG_ID, name, location,
+                party_code=(f.get('party_code') or '').strip(),
+                dist_twy_km=_safe_int(f.get('dist_twy_km')), dist_owy_km=_safe_int(f.get('dist_owy_km')),
+                lp_owy=_safe_num(f.get('lp_owy')), lp_twy=_safe_num(f.get('lp_twy')),
+                trolla_owy=_safe_num(f.get('trolla_owy')), trolla_twy=_safe_num(f.get('trolla_twy')),
+            )
+            _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'rate_row', rate.id,
+                                summary=f'Added rate {name} ({location})', user=current_user())
+            pg_session.commit()
+            flash(f'Added rate row for {name} ({location}).')
+        except IntegrityError:
+            pg_session.rollback()
+            flash(f'A rate row already exists for {name} at {location}. Use Edit instead.')
+        return redirect(url_for('rate_list_editor'))
+
     conn = get_db()
     try:
         conn.execute(
@@ -3415,6 +3501,28 @@ def rate_list_add():
 @app.route('/rate-list/<int:rid>/update', methods=['POST'])
 def rate_list_update(rid):
     f = request.form
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+        name = (f.get('customer_name') or '').strip().upper()
+        location = (f.get('location') or '').strip().upper()
+        rate = _pg_rates.update_rate(
+            pg_session, ORG_ID, rid, name, location,
+            party_code=(f.get('party_code') or '').strip(),
+            dist_twy_km=_safe_int(f.get('dist_twy_km')), dist_owy_km=_safe_int(f.get('dist_owy_km')),
+            lp_owy=_safe_num(f.get('lp_owy')), lp_twy=_safe_num(f.get('lp_twy')),
+            trolla_owy=_safe_num(f.get('trolla_owy')), trolla_twy=_safe_num(f.get('trolla_twy')),
+        )
+        if rate is not None:
+            _pg_audit.log_audit(pg_session, ORG_ID, 'update', 'rate_row', rid,
+                                summary=f'Edited rate {name} ({location})', user=current_user())
+        pg_session.commit()
+        flash('Rate row updated.')
+        return redirect(url_for('rate_list_editor', q=request.args.get('q', '')))
+
     conn = get_db()
     before_row = conn.execute('SELECT * FROM freight_rates WHERE id=?', (rid,)).fetchone()
     after_vals = {
@@ -3454,6 +3562,19 @@ def rate_list_update(rid):
 
 @app.route('/rate-list/<int:rid>/delete', methods=['POST'])
 def rate_list_delete(rid):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import freight_rate_service as _pg_rates
+        pg_session = _pg_database.get_session()
+        label = _pg_rates.delete_rate(pg_session, ORG_ID, rid)
+        summary = f'Deleted rate {label[0]} ({label[1]})' if label else f'Deleted rate #{rid}'
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'rate_row', rid,
+                            summary=summary, user=current_user())
+        pg_session.commit()
+        flash('Rate row deleted.')
+        return redirect(url_for('rate_list_editor', q=request.args.get('q', '')))
+
     conn = get_db()
     row = conn.execute('SELECT customer_name, location FROM freight_rates WHERE id=?', (rid,)).fetchone()
     summary = f'Deleted rate {row["customer_name"]} ({row["location"]})' if row else f'Deleted rate #{rid}'
@@ -3661,6 +3782,43 @@ def api_vehicle_history(vehicle_no):
     v = (vehicle_no or '').strip().upper().replace(' ', '')
     if len(v) < 4:
         return jsonify({'found': False})
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        params = {'org': ORG_ID, 'v': v}
+        last = pg_session.execute(text(
+            '''SELECT entry_date, station, freight, advance_cash, advance_account,
+                      diesel, mt_qty, trip_type, transporter_id, gr_no
+               FROM ledger_entries
+               WHERE organization_id=:org AND UPPER(REPLACE(vehicle_no, ' ', '')) = :v
+               ORDER BY entry_date DESC, id DESC LIMIT 1'''), params).mappings().fetchone()
+        if not last:
+            return jsonify({'found': False})
+        freq_station = pg_session.execute(text(
+            '''SELECT station, COUNT(*) c FROM ledger_entries
+               WHERE organization_id=:org AND UPPER(REPLACE(vehicle_no, ' ', '')) = :v AND station != ''
+               GROUP BY station ORDER BY c DESC LIMIT 1'''), params).mappings().fetchone()
+        challan = pg_session.execute(text(
+            '''SELECT consignee_name, invoice_no, weight_kg
+               FROM challans WHERE organization_id=:org AND id IN
+                 (SELECT challan_id FROM ledger_entries
+                  WHERE organization_id=:org AND UPPER(REPLACE(vehicle_no, ' ', '')) = :v AND challan_id IS NOT NULL
+                  ORDER BY entry_date DESC LIMIT 1)'''), params).mappings().fetchone()
+        out = dict(last)
+        for k in ('freight', 'advance_cash', 'advance_account', 'diesel', 'mt_qty'):
+            if out.get(k) is not None:
+                out[k] = float(out[k])
+        out['found'] = True
+        if freq_station:
+            out['frequent_station'] = freq_station['station']
+        if challan:
+            out['last_consignee'] = challan.get('consignee_name')
+            out['last_invoice'] = challan.get('invoice_no')
+        return jsonify(out)
+
     conn = get_db()
     last = conn.execute(
         '''SELECT entry_date, station, freight, advance_cash, advance_account,
@@ -3704,6 +3862,47 @@ def api_search():
     if len(q) < 2:
         return jsonify({'bills': [], 'challans': [], 'ledger': [], 'clients': []})
     like = f'%{q}%'
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        params = {'org': ORG_ID, 'like': like}
+        bills = [dict(r) for r in pg_session.execute(text(
+            '''SELECT id, bill_no, recipient_name, total_amount, bill_date FROM bills
+               WHERE organization_id=:org AND
+                     (bill_no ILIKE :like OR recipient_name ILIKE :like OR vehicle_no ILIKE :like)
+               ORDER BY id DESC LIMIT 6'''), params).mappings().all()]
+        challans = [dict(r) for r in pg_session.execute(text(
+            '''SELECT id, lr_no, consignee_name, truck_no FROM challans
+               WHERE organization_id=:org AND
+                     (lr_no ILIKE :like OR consignee_name ILIKE :like OR truck_no ILIKE :like OR invoice_no ILIKE :like)
+               ORDER BY id DESC LIMIT 6'''), params).mappings().all()]
+        ledger = [dict(r) for r in pg_session.execute(text(
+            '''SELECT id, gr_no, vehicle_no, station, entry_date FROM ledger_entries
+               WHERE organization_id=:org AND
+                     (gr_no ILIKE :like OR vehicle_no ILIKE :like OR station ILIKE :like OR shipment_no ILIKE :like)
+               ORDER BY id DESC LIMIT 6'''), params).mappings().all()]
+        clients = [r[0] for r in pg_session.execute(text(
+            '''SELECT DISTINCT recipient_name FROM bills
+               WHERE organization_id=:org AND recipient_name ILIKE :like LIMIT 6'''), params).fetchall() if r[0]]
+
+        return jsonify({
+            'bills':    [{'title': f'Bill {b["bill_no"]}',
+                          'subtitle': f'{b["recipient_name"] or ""} · ₹{float(b["total_amount"]):,.0f}' if b["total_amount"] else (b["recipient_name"] or ""),
+                          'link': url_for('view_bill', bill_id=b['id'])} for b in bills],
+            'challans': [{'title': f'LR-{c["lr_no"]}',
+                          'subtitle': f'{c["consignee_name"] or ""} · {c["truck_no"] or ""}',
+                          'link': url_for('challan_review', challan_id=c['id'])} for c in challans],
+            'ledger':   [{'title': f'GR-{le["gr_no"] or le["id"]}',
+                          'subtitle': f'{le["vehicle_no"] or ""} · {le["station"] or ""}',
+                          'link': url_for('ledger_view', le_id=le['id'])} for le in ledger],
+            'clients':  [{'title': name, 'subtitle': 'open ledger card',
+                          'link': url_for('party_detail', party_type='client', party_key=name)}
+                         for name in clients],
+        })
+
     conn = get_db()
     try:
         bills = [dict(r) for r in conn.execute(
@@ -3839,9 +4038,183 @@ def _load_trip_360(conn, challan_id, le_id):
     }
 
 
+def _pg_load_trip_summary(pg_session, org_id, challan_id, le_id):
+    from sqlalchemy import text
+    s = {'challan_id': challan_id, 'le_id': le_id,
+         'lr_no': '', 'date': '', 'vehicle': '', 'consignee': ''}
+    if challan_id:
+        r = pg_session.execute(text(
+            'SELECT lr_no, challan_date, truck_no, consignee_name FROM challans '
+            'WHERE organization_id=:org AND id=:id'), {'org': org_id, 'id': challan_id}).mappings().fetchone()
+        if r:
+            s.update({'lr_no': r['lr_no'] or '', 'date': r['challan_date'] or '',
+                      'vehicle': r['truck_no'] or '', 'consignee': r['consignee_name'] or ''})
+    elif le_id:
+        r = pg_session.execute(text(
+            'SELECT gr_no, entry_date, vehicle_no, station FROM ledger_entries '
+            'WHERE organization_id=:org AND id=:id'), {'org': org_id, 'id': le_id}).mappings().fetchone()
+        if r:
+            s.update({'lr_no': r['gr_no'] or '', 'date': r['entry_date'] or '',
+                      'vehicle': r['vehicle_no'] or '', 'consignee': r['station'] or ''})
+    return s
+
+
+def _pg_load_trip_360(pg_session, org_id, challan_id, le_id):
+    from sqlalchemy import text
+    params_base = {'org': org_id}
+    challan = None
+    ledger = None
+    bill = None
+
+    if challan_id:
+        r = pg_session.execute(text('SELECT * FROM challans WHERE organization_id=:org AND id=:id'),
+                               {**params_base, 'id': challan_id}).mappings().fetchone()
+        if r:
+            challan = dict(r)
+            if not le_id and challan.get('ledger_entry_id'):
+                le_id = challan['ledger_entry_id']
+
+    if le_id:
+        r = pg_session.execute(text('SELECT * FROM ledger_entries WHERE organization_id=:org AND id=:id'),
+                               {**params_base, 'id': le_id}).mappings().fetchone()
+        if r:
+            ledger = dict(r)
+            ledger['balance'] = _ledger_balance(ledger)
+            if ledger.get('bill_id'):
+                br = pg_session.execute(text('SELECT * FROM bills WHERE organization_id=:org AND id=:id'),
+                                        {**params_base, 'id': ledger['bill_id']}).mappings().fetchone()
+                if br:
+                    bill = dict(br)
+            if not challan and ledger.get('challan_id'):
+                cr = pg_session.execute(text('SELECT * FROM challans WHERE organization_id=:org AND id=:id'),
+                                        {**params_base, 'id': ledger['challan_id']}).mappings().fetchone()
+                if cr:
+                    challan = dict(cr)
+
+    payments_to_transporter = []
+    if ledger and ledger.get('transporter_id'):
+        payments_to_transporter = [dict(r) for r in pg_session.execute(text(
+            '''SELECT * FROM payments WHERE organization_id=:org AND party_type='transporter' AND party_key=:pk
+               ORDER BY payment_date DESC LIMIT 5'''),
+            {**params_base, 'pk': str(ledger['transporter_id'])}).mappings().all()]
+
+    payments_from_client = []
+    if bill and bill.get('recipient_name'):
+        payments_from_client = [dict(r) for r in pg_session.execute(text(
+            '''SELECT * FROM payments WHERE organization_id=:org AND party_type='client' AND party_key=:pk
+               ORDER BY payment_date DESC LIMIT 5'''),
+            {**params_base, 'pk': bill['recipient_name']}).mappings().all()]
+
+    warnings = []
+    if challan and ledger:
+        if challan.get('lr_no') and ledger.get('gr_no') and \
+           str(challan['lr_no']).strip() != str(ledger['gr_no']).strip():
+            warnings.append(
+                f'LR No. on challan ({challan["lr_no"]}) ≠ GR No. on ledger ({ledger["gr_no"]})')
+        if challan.get('truck_no') and ledger.get('vehicle_no') and \
+           challan['truck_no'].upper().replace(' ', '') != ledger['vehicle_no'].upper().replace(' ', ''):
+            warnings.append(
+                f'Vehicle mismatch: challan {challan["truck_no"]} vs ledger {ledger["vehicle_no"]}')
+        cw = challan.get('weight_kg')
+        lw = ledger.get('weight_kg') or (
+            (ledger.get('mt_qty') or 0) * 1000 if ledger.get('mt_qty') else None)
+        if cw and lw and abs(cw - lw) > 100:
+            warnings.append(f'Weight mismatch: challan {cw:.0f} kg vs ledger {lw:.0f} kg')
+
+    if challan and challan.get('pod_doc_no') and challan.get('del_no') and \
+       str(challan['pod_doc_no']).strip() != str(challan['del_no']).strip():
+        warnings.append(
+            f'Del No. ({challan["del_no"]}) ≠ PoD Doc No. ({challan["pod_doc_no"]}) — typo?')
+
+    return {
+        'challan': challan, 'ledger': ledger, 'bill': bill,
+        'payments_to_transporter': payments_to_transporter,
+        'payments_from_client': payments_from_client,
+        'warnings': warnings,
+    }
+
+
 @app.route('/trip')
 def trip_lookup():
     q = (request.args.get('q') or '').strip()
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        matches = []
+        seen = set()
+
+        def add(challan_id, le_id, reason, conf):
+            key = (challan_id, le_id)
+            if key in seen:
+                return
+            seen.add(key)
+            matches.append({'challan_id': challan_id, 'le_id': le_id,
+                            'reason': reason, 'confidence': conf})
+
+        if q:
+            org_p = {'org': ORG_ID}
+            for r in pg_session.execute(text(
+                    'SELECT id, ledger_entry_id FROM challans WHERE organization_id=:org AND lr_no=:q'),
+                    {**org_p, 'q': q}).mappings().all():
+                add(r['id'], r['ledger_entry_id'], f'LR No. = "{q}"', 100)
+
+            for r in pg_session.execute(text(
+                    '''SELECT id, ledger_entry_id FROM challans
+                       WHERE organization_id=:org AND (del_no=:q OR pod_doc_no=:q)'''),
+                    {**org_p, 'q': q}).mappings().all():
+                add(r['id'], r['ledger_entry_id'], f'Del No. / PoD Doc No. = "{q}"', 100)
+
+            for r in pg_session.execute(text(
+                    'SELECT id, ledger_entry_id FROM challans WHERE organization_id=:org AND invoice_no=:q'),
+                    {**org_p, 'q': q}).mappings().all():
+                add(r['id'], r['ledger_entry_id'], f'Invoice No. = "{q}"', 95)
+
+            for r in pg_session.execute(text(
+                    'SELECT id, challan_id FROM ledger_entries WHERE organization_id=:org AND gr_no=:q'),
+                    {**org_p, 'q': q}).mappings().all():
+                add(r['challan_id'], r['id'], f'Ledger GR No. = "{q}"', 95)
+
+            for r in pg_session.execute(text(
+                    'SELECT id, challan_id FROM ledger_entries WHERE organization_id=:org AND shipment_no=:q'),
+                    {**org_p, 'q': q}).mappings().all():
+                add(r['challan_id'], r['id'], f'Ledger Shipment / Invoice = "{q}"', 90)
+
+            if not matches:
+                like_p = {**org_p, 'like': f'%{q}%'}
+                for r in pg_session.execute(text(
+                        '''SELECT id, ledger_entry_id FROM challans
+                           WHERE organization_id=:org AND
+                                 (lr_no ILIKE :like OR del_no ILIKE :like OR pod_doc_no ILIKE :like
+                                  OR invoice_no ILIKE :like OR truck_no ILIKE :like OR consignee_name ILIKE :like)
+                           ORDER BY id DESC LIMIT 8'''), like_p).mappings().all():
+                    add(r['id'], r['ledger_entry_id'], 'Fuzzy match in challan', 60)
+                for r in pg_session.execute(text(
+                        '''SELECT id, challan_id FROM ledger_entries
+                           WHERE organization_id=:org AND
+                                 (gr_no ILIKE :like OR vehicle_no ILIKE :like OR shipment_no ILIKE :like
+                                  OR station ILIKE :like)
+                           ORDER BY id DESC LIMIT 8'''), like_p).mappings().all():
+                    add(r['challan_id'], r['id'], 'Fuzzy match in ledger', 55)
+
+        trip = None
+        summaries = []
+        if len(matches) == 1:
+            m = matches[0]
+            trip = _pg_load_trip_360(pg_session, ORG_ID, m['challan_id'], m['le_id'])
+            trip['match_reason'] = m['reason']
+            trip['confidence'] = m['confidence']
+        elif len(matches) > 1:
+            for m in matches[:10]:
+                s = _pg_load_trip_summary(pg_session, ORG_ID, m['challan_id'], m['le_id'])
+                s['reason'] = m['reason']
+                s['confidence'] = m['confidence']
+                summaries.append(s)
+
+        return render_template('trip_view.html', q=q, trip=trip, matches=summaries)
+
     conn = get_db()
     matches = []
     seen = set()  # (challan_id, le_id) tuples we've already added
@@ -5240,6 +5613,24 @@ def challan_review(challan_id):
 
 @app.route('/challan/<int:challan_id>/delete', methods=['POST'])
 def challan_delete(challan_id):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Challan, ChallanArchive
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import recycle_bin_service as _pg_recycle
+        pg_session = _pg_database.get_session()
+        challan = pg_session.get(Challan, challan_id)
+        if challan is None or str(challan.organization_id) != str(ORG_ID):
+            flash('Challan not found.')
+            return redirect(url_for('challans_index'))
+        sm = f'Deleted challan LR-{challan.lr_no} → {challan.consignee_name or ""}'
+        _pg_recycle.archive_and_delete(pg_session, ORG_ID, Challan, ChallanArchive, challan_id)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'challan', challan_id,
+                            summary=sm + ' (→ Recycle Bin)', user=current_user())
+        pg_session.commit()
+        flash('Challan moved to the Recycle Bin.')
+        return redirect(url_for('challans_index'))
+
     conn = get_db()
     row = conn.execute('SELECT lr_no, consignee_name FROM challans WHERE id=?', (challan_id,)).fetchone()
     if not row:
@@ -6047,6 +6438,24 @@ def ledger_paid(le_id):
 
 @app.route('/ledger/<int:le_id>/delete', methods=['POST'])
 def ledger_delete(le_id):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import LedgerEntry, LedgerEntryArchive
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import recycle_bin_service as _pg_recycle
+        pg_session = _pg_database.get_session()
+        entry = pg_session.get(LedgerEntry, le_id)
+        if entry is None or str(entry.organization_id) != str(ORG_ID):
+            flash('Ledger entry not found.')
+            return redirect(url_for('ledger_index'))
+        sm = f'Deleted ledger entry GR-{entry.gr_no}'
+        _pg_recycle.archive_and_delete(pg_session, ORG_ID, LedgerEntry, LedgerEntryArchive, le_id)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'ledger_entry', le_id,
+                            summary=sm + ' (→ Recycle Bin)', user=current_user())
+        pg_session.commit()
+        flash('Ledger entry moved to the Recycle Bin.')
+        return redirect(url_for('ledger_index'))
+
     conn = get_db()
     row = conn.execute('SELECT gr_no FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
     if not row:
@@ -6654,6 +7063,76 @@ def dashboard():
     overdue_days = int(get_setting('pod_overdue_days') or 10)
     overdue_cutoff = (today - timedelta(days=overdue_days)).isoformat()
 
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+
+        def one(sql, **params):
+            row = pg_session.execute(text(sql), {'org': ORG_ID, **params}).fetchone()
+            return row[0] if row and row[0] is not None else 0
+
+        _clients_bal = list_clients_with_balance()
+        client_outstanding = sum(c['balance'] for c in _clients_bal if c['balance'] > 0.005)
+        client_outstanding_count = sum(1 for c in _clients_bal if c['balance'] > 0.005)
+        transporter_balance_owed = 0.0
+        for _t in get_transporters():
+            _b = get_party_balance('transporter', _t['id'])
+            if _b > 0.005:
+                transporter_balance_owed += _b
+
+        kpis = {
+            'trips_dispatched_week': one(
+                "SELECT COUNT(*) FROM challans WHERE organization_id=:org AND challan_date >= :d AND status != 'draft'",
+                d=week_ago),
+            'bills_generated_week': one(
+                "SELECT COUNT(*) FROM bills WHERE organization_id=:org AND bill_date >= :d", d=week_ago),
+            'freight_billed_week': float(one(
+                "SELECT COALESCE(SUM(total_amount),0) FROM bills WHERE organization_id=:org AND bill_date >= :d",
+                d=week_ago)),
+            'advances_paid_week': float(one(
+                """SELECT COALESCE(SUM(advance_cash + advance_account + diesel),0)
+                   FROM ledger_entries WHERE organization_id=:org AND entry_date >= :d""", d=week_ago)),
+            'freight_billed_month': float(one(
+                "SELECT COALESCE(SUM(total_amount),0) FROM bills WHERE organization_id=:org AND bill_date >= :d",
+                d=month_ago)),
+            'advances_paid_month': float(one(
+                """SELECT COALESCE(SUM(advance_cash + advance_account + diesel),0)
+                   FROM ledger_entries WHERE organization_id=:org AND entry_date >= :d""", d=month_ago)),
+            'pod_pending_count': one(
+                "SELECT COUNT(*) FROM ledger_entries WHERE organization_id=:org AND pod_received = false"),
+            'pod_overdue_count': one(
+                """SELECT COUNT(*) FROM ledger_entries
+                   WHERE organization_id=:org AND pod_received = false AND entry_date < :d""", d=overdue_cutoff),
+            'ready_to_bill_count': one(
+                """SELECT COUNT(*) FROM ledger_entries
+                   WHERE organization_id=:org AND pod_received = true AND bill_id IS NULL"""),
+            'transporter_balance_owed': transporter_balance_owed,
+            'client_outstanding': client_outstanding,
+            'client_outstanding_count': client_outstanding_count,
+        }
+
+        recent = []
+        for row in pg_session.execute(text(
+                """SELECT 'challan' AS kind, id, lr_no AS ref, challan_date AS dt, consignee_name AS detail
+                   FROM challans WHERE organization_id=:org AND status != 'draft'
+                   ORDER BY id DESC LIMIT 5"""), {'org': ORG_ID}).mappings():
+            recent.append(dict(row))
+        for row in pg_session.execute(text(
+                """SELECT 'bill' AS kind, id, bill_no AS ref, bill_date AS dt, recipient_name AS detail
+                   FROM bills WHERE organization_id=:org
+                   ORDER BY id DESC LIMIT 5"""), {'org': ORG_ID}).mappings():
+            recent.append(dict(row))
+        recent.sort(key=lambda x: str(x.get('dt') or ''), reverse=True)
+        recent = recent[:10]
+
+        # Supabase manages its own backups for Postgres — the local-disk
+        # "Data Vault" tile (dashboard.html) is specific to the offline
+        # SQLite desktop build and doesn't apply here; vault=None hides it.
+        return render_template('dashboard.html', kpis=kpis, recent=recent,
+                               overdue_days=overdue_days, vault=None)
+
     conn = get_db()
     def one(sql, *params):
         r = conn.execute(sql, params).fetchone()
@@ -6733,6 +7212,63 @@ def report_diesel():
     df = f.get('from') or default_from
     dt = f.get('to')   or today.isoformat()
 
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        params = {'org': ORG_ID, 'df': df, 'dt': dt}
+
+        by_vendor = [dict(r) for r in pg_session.execute(text("""
+          SELECT COALESCE(dv.name, '— No vendor —') AS vendor,
+                 COUNT(le.id)  AS trips,
+                 COALESCE(SUM(le.diesel), 0) AS total_diesel
+          FROM ledger_entries le
+          LEFT JOIN diesel_vendors dv ON dv.id = le.diesel_vendor_id
+          WHERE le.organization_id=:org AND le.entry_date BETWEEN :df AND :dt AND le.diesel > 0
+          GROUP BY le.diesel_vendor_id, dv.name
+          ORDER BY total_diesel DESC
+        """), params).mappings().all()]
+
+        by_vehicle = [dict(r) for r in pg_session.execute(text("""
+          SELECT COALESCE(le.vehicle_no, '—') AS vehicle,
+                 COUNT(*) AS trips,
+                 COALESCE(SUM(le.diesel), 0) AS total_diesel
+          FROM ledger_entries le
+          WHERE le.organization_id=:org AND le.entry_date BETWEEN :df AND :dt AND le.diesel > 0
+          GROUP BY le.vehicle_no
+          ORDER BY total_diesel DESC LIMIT 30
+        """), params).mappings().all()]
+
+        for r in by_vendor:
+            r['total_diesel'] = float(r['total_diesel'])
+        for r in by_vehicle:
+            r['total_diesel'] = float(r['total_diesel'])
+
+        grand_total = sum(r['total_diesel'] for r in by_vendor)
+        grand_trips = sum(r['trips'] for r in by_vendor)
+
+        all_vendors = [dict(r) for r in pg_session.execute(text("""
+          SELECT dv.id, dv.name, dv.location,
+                 COUNT(le.id) AS trips,
+                 COALESCE(SUM(le.diesel), 0) AS total_diesel,
+                 MAX(le.entry_date) AS last_used
+          FROM diesel_vendors dv
+          LEFT JOIN ledger_entries le ON le.diesel_vendor_id = dv.id AND le.diesel > 0
+                 AND le.organization_id = dv.organization_id
+          WHERE dv.organization_id=:org
+          GROUP BY dv.id
+          ORDER BY dv.name
+        """), {'org': ORG_ID}).mappings().all()]
+        for r in all_vendors:
+            r['total_diesel'] = float(r['total_diesel'])
+
+        return render_template('report_diesel.html',
+                               by_vendor=by_vendor, by_vehicle=by_vehicle,
+                               all_vendors=all_vendors,
+                               grand_total=grand_total, grand_trips=grand_trips,
+                               date_from=df, date_to=dt)
+
     conn = get_db()
     by_vendor = conn.execute("""
       SELECT COALESCE(dv.name, '— No vendor —') AS vendor,
@@ -6786,6 +7322,60 @@ def report_transporters():
     f = request.args
     df = f.get('from') or ''
     dt = f.get('to')   or ''
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        where, params = ['le.organization_id=:org'], {'org': ORG_ID}
+        if df:
+            where.append('le.entry_date >= :df'); params['df'] = df
+        if dt:
+            where.append('le.entry_date <= :dt'); params['dt'] = dt
+        where_sql = ' AND '.join(where)
+
+        rows = [dict(r) for r in pg_session.execute(text(f"""
+          SELECT t.id, t.name, t.mobile,
+                 COUNT(le.id) AS trip_count,
+                 COALESCE(SUM(le.freight), 0)         AS total_freight,
+                 COALESCE(SUM(le.advance_cash), 0)    AS total_cash,
+                 COALESCE(SUM(le.advance_account), 0) AS total_account,
+                 COALESCE(SUM(le.diesel), 0)          AS total_diesel
+          FROM transporters t
+          LEFT JOIN ledger_entries le
+                 ON le.transporter_id = t.id AND le.organization_id = t.organization_id
+                AND ({where_sql})
+          WHERE t.organization_id=:org
+          GROUP BY t.id
+          ORDER BY trip_count DESC
+        """), params).mappings().all()]
+        for r in rows:
+            r['total_freight'] = float(r['total_freight'])
+            r['total_cash'] = float(r['total_cash'])
+            r['total_account'] = float(r['total_account'])
+            r['total_diesel'] = float(r['total_diesel'])
+            r['balance_owed'] = get_party_balance('transporter', r['id'])
+        rows.sort(key=lambda r: (r['balance_owed'], r['trip_count']), reverse=True)
+
+        unassigned_where = ' AND '.join(['le.transporter_id IS NULL'] + where[1:])
+        unassigned_row = pg_session.execute(text(f"""
+          SELECT COUNT(*) AS trip_count,
+                 COALESCE(SUM(freight), 0)         AS total_freight,
+                 COALESCE(SUM(advance_cash), 0)    AS total_cash,
+                 COALESCE(SUM(advance_account), 0) AS total_account,
+                 COALESCE(SUM(diesel), 0)          AS total_diesel
+          FROM ledger_entries le
+          WHERE le.organization_id=:org AND {unassigned_where}
+        """), params).mappings().fetchone()
+        unassigned = dict(unassigned_row) if unassigned_row else None
+        if unassigned:
+            for k in ('total_freight', 'total_cash', 'total_account', 'total_diesel'):
+                unassigned[k] = float(unassigned[k])
+
+        return render_template('report_transporters.html',
+                               rows=rows, unassigned=unassigned,
+                               date_from=df, date_to=dt)
+
     where, params = ['1=1'], []
     if df:
         where.append('le.entry_date >= ?'); params.append(df)
@@ -6838,6 +7428,52 @@ def report_transporter_detail(tid):
     f = request.args
     df = f.get('from') or ''
     dt = f.get('to')   or ''
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Transporter
+        pg_session = _pg_database.get_session()
+        transporter = pg_session.get(Transporter, tid)
+        if transporter is None or str(transporter.organization_id) != str(ORG_ID):
+            return 'Transporter not found', 404
+
+        where, params = ['organization_id=:org', 'transporter_id=:tid'], {'org': ORG_ID, 'tid': tid}
+        if df: where.append('entry_date >= :df'); params['df'] = df
+        if dt: where.append('entry_date <= :dt'); params['dt'] = dt
+
+        rows = pg_session.execute(text(
+            f"SELECT * FROM ledger_entries WHERE {' AND '.join(where)} ORDER BY entry_date DESC"
+        ), params).mappings().all()
+
+        entries = []
+        total_freight = total_cash = total_account = total_diesel = 0.0
+        for row in rows:
+            e = dict(row)
+            f_amt  = float(e['freight'] or 0)
+            c_amt  = float(e['advance_cash'] or 0)
+            ac_amt = float(e['advance_account'] or 0)
+            d_amt  = float(e['diesel'] or 0)
+            e['balance'] = _ledger_balance(e)
+            total_freight += f_amt
+            total_cash    += c_amt
+            total_account += ac_amt
+            total_diesel  += d_amt
+            entries.append(e)
+        balance_owed_total = get_party_balance('transporter', tid)
+
+        return render_template('report_transporter_detail.html',
+                               transporter={'id': transporter.id, 'name': transporter.name,
+                                            'mobile': transporter.mobile,
+                                            'bank_details': transporter.bank_details,
+                                            'notes': transporter.notes},
+                               entries=entries,
+                               date_from=df, date_to=dt,
+                               total_freight=total_freight, total_cash=total_cash,
+                               total_account=total_account, total_diesel=total_diesel,
+                               balance_owed_total=balance_owed_total)
+
     conn = get_db()
     transporter = conn.execute('SELECT * FROM transporters WHERE id=?', (tid,)).fetchone()
     if not transporter:
@@ -7049,6 +7685,25 @@ def payment_add():
 
 @app.route('/payments/<int:pid>/delete', methods=['POST'])
 def payment_delete(pid):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Payment, PaymentArchive
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import recycle_bin_service as _pg_recycle
+        pg_session = _pg_database.get_session()
+        payment = pg_session.get(Payment, pid)
+        if payment is None or str(payment.organization_id) != str(ORG_ID):
+            flash('Payment not found.')
+            return redirect(url_for('payments_hub'))
+        party_type, party_key, amount = payment.party_type, payment.party_key, float(payment.amount)
+        _pg_recycle.archive_and_delete(pg_session, ORG_ID, Payment, PaymentArchive, pid)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'delete', 'payment', pid,
+                            summary=f'Reverted ₹{amount:,.2f} payment for {party_type} {party_key} (→ Recycle Bin)',
+                            user=current_user())
+        pg_session.commit()
+        flash('Payment moved to the Recycle Bin.')
+        return redirect(url_for('party_detail', party_type=party_type, party_key=party_key))
+
     conn = get_db()
     row = conn.execute('SELECT * FROM payments WHERE id=?', (pid,)).fetchone()
     if not row:
@@ -7090,8 +7745,54 @@ _RECYCLE = {
 }
 
 
+def _pg_recycle_config():
+    """Postgres counterpart of _RECYCLE — model classes instead of table
+    names. Import deferred (munshi.pg pulls in psycopg, excluded from the
+    desktop PyInstaller build)."""
+    from munshi.pg.models import (
+        Bill, BillArchive, Challan, ChallanArchive, LedgerEntry,
+        LedgerEntryArchive, Payment, PaymentArchive,
+    )
+    return {
+        'bill':    {'model': Bill, 'archive': BillArchive, 'label': 'Bill',
+                    'redirect': 'index', 'purge_null': [(LedgerEntry, 'bill_id')]},
+        'challan': {'model': Challan, 'archive': ChallanArchive, 'label': 'Challan',
+                    'redirect': 'challans_index', 'purge_null': [(LedgerEntry, 'challan_id')]},
+        'ledger':  {'model': LedgerEntry, 'archive': LedgerEntryArchive, 'label': 'Ledger entry',
+                    'redirect': 'ledger_index',
+                    'purge_null': [(Bill, 'ledger_entry_id'), (Challan, 'ledger_entry_id')]},
+        'payment': {'model': Payment, 'archive': PaymentArchive, 'label': 'Payment',
+                    'redirect': 'payments_hub', 'purge_null': []},
+    }
+
+
 @app.route('/recycle-bin')
 def recycle_bin():
+    if PG_MODE:
+        from sqlalchemy import select
+
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import (
+            BillArchive, ChallanArchive, LedgerEntryArchive, PaymentArchive,
+        )
+        pg_session = _pg_database.get_session()
+        bins = {
+            'bills': pg_session.execute(
+                select(BillArchive).where(BillArchive.organization_id == ORG_ID)
+                .order_by(BillArchive.bill_no)).scalars().all(),
+            'challans': pg_session.execute(
+                select(ChallanArchive).where(ChallanArchive.organization_id == ORG_ID)
+                .order_by(ChallanArchive.lr_no)).scalars().all(),
+            'ledger_entries': pg_session.execute(
+                select(LedgerEntryArchive).where(LedgerEntryArchive.organization_id == ORG_ID)
+                .order_by(LedgerEntryArchive.entry_date.desc(), LedgerEntryArchive.id.desc())).scalars().all(),
+            'payments': pg_session.execute(
+                select(PaymentArchive).where(PaymentArchive.organization_id == ORG_ID)
+                .order_by(PaymentArchive.payment_date.desc(), PaymentArchive.id.desc())).scalars().all(),
+        }
+        total = sum(len(v) for v in bins.values())
+        return render_template('recycle_bin.html', bins=bins, total=total)
+
     conn = get_db()
     bins = {
         'bills': [dict(r) for r in conn.execute(
@@ -7114,6 +7815,28 @@ def recycle_bin():
 
 @app.route('/recycle-bin/<entity>/<int:rid>/restore', methods=['POST'])
 def recycle_restore(entity, rid):
+    if PG_MODE:
+        info = _pg_recycle_config().get(entity)
+        if not info:
+            flash('Unknown item type.')
+            return redirect(url_for('recycle_bin'))
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import recycle_bin_service as _pg_recycle
+        pg_session = _pg_database.get_session()
+        restored, error = _pg_recycle.restore(pg_session, ORG_ID, info['model'], info['archive'], rid)
+        if error == 'already_exists':
+            flash(f'{info["label"]} #{rid} already exists in the live list — not restored.')
+            return redirect(url_for('recycle_bin'))
+        if error:
+            flash(f'{info["label"]} #{rid} not found in the Recycle Bin.')
+            return redirect(url_for('recycle_bin'))
+        _pg_audit.log_audit(pg_session, ORG_ID, 'restore', entity, rid,
+                            summary=f'Restored {info["label"].lower()} #{rid} from Recycle Bin', user=current_user())
+        pg_session.commit()
+        flash(f'{info["label"]} restored.')
+        return redirect(url_for(info['redirect']))
+
     info = _RECYCLE.get(entity)
     if not info:
         flash('Unknown item type.')
@@ -7140,6 +7863,26 @@ def recycle_purge(entity, rid):
     if current_user_role() != 'admin':
         flash('Only admins can permanently delete from the Recycle Bin.')
         return redirect(url_for('recycle_bin'))
+
+    if PG_MODE:
+        info = _pg_recycle_config().get(entity)
+        if not info:
+            flash('Unknown item type.')
+            return redirect(url_for('recycle_bin'))
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import recycle_bin_service as _pg_recycle
+        pg_session = _pg_database.get_session()
+        ok = _pg_recycle.purge(pg_session, ORG_ID, info['archive'], rid, info['purge_null'])
+        if not ok:
+            flash(f'{info["label"]} #{rid} not found in the Recycle Bin.')
+            return redirect(url_for('recycle_bin'))
+        _pg_audit.log_audit(pg_session, ORG_ID, 'purge', entity, rid,
+                            summary=f'Permanently deleted {info["label"].lower()} #{rid}', user=current_user())
+        pg_session.commit()
+        flash(f'{info["label"]} permanently deleted.')
+        return redirect(url_for('recycle_bin'))
+
     info = _RECYCLE.get(entity)
     if not info:
         flash('Unknown item type.')
@@ -7163,6 +7906,32 @@ def recycle_purge(entity, rid):
 def audit_log_view():
     """Filterable global activity log."""
     f = request.args
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        pg_session = _pg_database.get_session()
+        date_to = (f['to'] + 'T23:59:59') if f.get('to') else None
+        rows = _pg_audit.list_audit_log(
+            pg_session, ORG_ID, user=f.get('user') or None, action=f.get('action') or None,
+            entity=f.get('entity') or None, date_from=f.get('from') or None, date_to=date_to,
+            q=f.get('q') or None,
+        )
+        entries = [{
+            'id': r.id, 'occurred_at': r.occurred_at.isoformat() if r.occurred_at else '',
+            'user_name': r.user_name, 'action': r.action, 'entity': r.entity,
+            'entity_id': r.entity_id, 'summary': r.summary, 'changes_parsed': r.changes,
+        } for r in rows]
+        distinct_users = _pg_audit.distinct_values(pg_session, ORG_ID, 'user_name')
+        distinct_actions = _pg_audit.distinct_values(pg_session, ORG_ID, 'action')
+        distinct_entities = _pg_audit.distinct_values(pg_session, ORG_ID, 'entity')
+        return render_template('audit.html',
+                               entries=entries,
+                               filters=dict(f),
+                               distinct_users=distinct_users,
+                               distinct_actions=distinct_actions,
+                               distinct_entities=distinct_entities)
+
     where, params = ['1=1'], []
     if f.get('user'):    where.append('user_name = ?'); params.append(f['user'])
     if f.get('action'):  where.append('action = ?'); params.append(f['action'])
