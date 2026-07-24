@@ -4837,8 +4837,119 @@ def _save_challan_upload(upload):
     return full_path, f'challans/{safe_name}', None
 
 
+def _save_challan_upload_pg(upload, organization_id):
+    """PG_MODE version of _save_challan_upload(): uploads to Supabase
+    Storage instead of local disk. Returns (temp_local_path, storage_key,
+    error) — error is None on success. The temp path exists only so Gemini
+    (extract_challan_image/extract_invoice_image, both file-path-based) can
+    read it; caller must delete it after use — the storage_key is the
+    permanent record."""
+    ext = Path(upload.filename).suffix.lower()
+    if ext not in ALLOWED_EXTS:
+        return None, None, f'Unsupported file type: {upload.filename}. Use JPG, PNG, PDF.'
+    import tempfile
+    from munshi.pg import storage as _pg_storage
+    safe_name = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}_{uuid.uuid4().hex[:8]}{ext}'
+    key = f'{organization_id}/challans/{safe_name}'
+    data = upload.read()
+    _pg_storage.upload_bytes(key, data, content_type=upload.mimetype or 'application/octet-stream')
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    return tmp_path, key, None
+
+
 @app.route('/challan/extract', methods=['GET', 'POST'])
 def challan_extract_upload():
+    if request.method == 'POST' and PG_MODE:
+        challan_upload = request.files.get('challan_file')
+        invoice_upload = request.files.get('invoice_file')
+        has_challan = bool(challan_upload and challan_upload.filename)
+        has_invoice = bool(invoice_upload and invoice_upload.filename)
+        if not has_challan and not has_invoice:
+            flash('Please choose a challan photo, an invoice photo, or both.')
+            return redirect(url_for('challan_extract_upload'))
+
+        d = {}
+        confidence = {}
+        challan_key = invoice_key = None
+        challan_raw = invoice_raw = None
+        tmp_paths = []
+
+        try:
+            if has_challan:
+                tmp_path, challan_key, err = _save_challan_upload_pg(challan_upload, ORG_ID)
+                if err:
+                    flash(err)
+                    return redirect(url_for('challan_extract_upload'))
+                tmp_paths.append(tmp_path)
+                result = extract_challan_image(tmp_path)
+                if not result['ok']:
+                    flash(f'Challan extraction failed: {result["error"]}')
+                    return redirect(url_for('challan_extract_upload'))
+                challan_raw = result['raw']
+                cd = result['data']
+                confidence.update(cd.get('confidence_per_field', {}))
+                d.update(cd)
+
+            if has_invoice:
+                tmp_path, invoice_key, err = _save_challan_upload_pg(invoice_upload, ORG_ID)
+                if err:
+                    flash(err)
+                    return redirect(url_for('challan_extract_upload'))
+                tmp_paths.append(tmp_path)
+                result = extract_invoice_image(tmp_path)
+                if not result['ok']:
+                    flash(f'Invoice extraction failed: {result["error"]}')
+                    return redirect(url_for('challan_extract_upload'))
+                invoice_raw = result['raw']
+                idata = result['data']
+                confidence.update(idata.get('confidence_per_field', {}))
+                for key in ('invoice_no', 'invoice_date', 'gst_number', 'consignment_value',
+                            'no_of_articles', 'description', 'value_of_goods'):
+                    if idata.get(key) not in (None, ''):
+                        d[key] = idata[key]
+                if not has_challan:
+                    for key in ('consignor_name', 'consignor_address', 'consignee_name', 'consignee_address'):
+                        if idata.get(key) not in (None, ''):
+                            d[key] = idata[key]
+        finally:
+            for p in tmp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import challan_service as _pg_challans
+        pg_session = _pg_database.get_session()
+        challan = _pg_challans.create_from_extraction(
+            pg_session, ORG_ID,
+            # challan_date/invoice_date are Date columns in Postgres — an
+            # AI-extracted empty string (Gemini found no date) must become
+            # None, not ''; SQLite tolerated '' silently in a TEXT column,
+            # Postgres raises InvalidDatetimeFormat (confirmed empirically).
+            challan_date=d.get('challan_date') or None,
+            consignor_name=d.get('consignor_name'), consignor_address=d.get('consignor_address'),
+            consignee_name=d.get('consignee_name'), consignee_address=d.get('consignee_address'),
+            from_city_state=d.get('from_city_state'), to_city_state=d.get('to_city_state'),
+            invoice_no=d.get('invoice_no'), invoice_date=d.get('invoice_date') or None,
+            consignment_value=_safe_num(d.get('consignment_value')), gst_number=d.get('gst_number'),
+            no_of_articles=d.get('no_of_articles'), description=d.get('description'),
+            value_of_goods=_safe_num(d.get('value_of_goods')), weight_kg=_safe_num(d.get('weight_kg')),
+            del_no=d.get('del_no'), shipment_no=d.get('shipment_no'),
+            cost_no=d.get('cost_no'), seal_no=d.get('seal_no'),
+            driver_name=d.get('driver_name'), driver_mobile=d.get('driver_mobile'),
+            truck_no=(d.get('truck_no') or '').upper().replace(' ', ''),
+            gate_in_time=d.get('gate_in_time'), gate_out_time=d.get('gate_out_time'),
+            lane_transit_time=d.get('lane_transit_time'), expected_arrival=d.get('expected_arrival'),
+            source_image=challan_key, raw_extraction=challan_raw,
+            invoice_source_image=invoice_key, invoice_raw_extraction=invoice_raw,
+            confidence_json=confidence,
+        )
+        pg_session.commit()
+        return redirect(url_for('challan_review', challan_id=challan.id))
+
     if request.method == 'POST':
         challan_upload = request.files.get('challan_file')
         invoice_upload = request.files.get('invoice_file')
@@ -6174,6 +6285,54 @@ def extract_ledger_image(file_path):
 
 @app.route('/ledger/extract', methods=['GET', 'POST'])
 def ledger_extract_upload():
+    if request.method == 'POST' and PG_MODE:
+        f = request.files.get('file')
+        if not f or not f.filename:
+            flash('Please choose a ledger photo or PDF.')
+            return redirect(url_for('ledger_extract_upload'))
+        ext = Path(f.filename).suffix.lower()
+        if ext not in ALLOWED_EXTS:
+            flash(f'Unsupported file type: {f.filename}.')
+            return redirect(url_for('ledger_extract_upload'))
+
+        import tempfile
+        from munshi.pg import database as _pg_database
+        from munshi.pg import storage as _pg_storage
+        from munshi.pg.services import ledger_extraction_service as _pg_ledger_extract
+        data = f.read()
+        key = f'{ORG_ID}/ledger-pages/{datetime.now().strftime("%Y%m%d-%H%M%S")}_{uuid.uuid4().hex[:8]}{ext}'
+        _pg_storage.upload_bytes(key, data, content_type=f.mimetype or 'application/octet-stream')
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+            result = extract_ledger_image(tmp_path)
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+        if not result['ok']:
+            flash(f'Extraction failed: {result["error"]}')
+            return redirect(url_for('ledger_extract_upload'))
+
+        extracted_data = result['data']
+        if result.get('error'):
+            flash(f'Note: {result["error"]} — please double-check the rows below carefully.')
+
+        pg_session = _pg_database.get_session()
+        extraction = _pg_ledger_extract.create_ledger_extraction(
+            pg_session, ORG_ID, source_image=key,
+            page_date=extracted_data.get('page_date') or None,
+            raw_json=extracted_data, status='pending',
+        )
+        pg_session.commit()
+        return redirect(url_for('ledger_extract_review', le_id=extraction.id))
+
     if request.method == 'POST':
         f = request.files.get('file')
         if not f or not f.filename:
@@ -6228,6 +6387,58 @@ def ledger_extract_upload():
 
 @app.route('/ledger/extract/<int:le_id>', methods=['GET', 'POST'])
 def ledger_extract_review(le_id):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import ledger_extraction_service as _pg_ledger_extract
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+        extraction_row = _pg_ledger_extract.get_ledger_extraction(pg_session, ORG_ID, le_id)
+        if extraction_row is None:
+            return 'Extraction not found', 404
+
+        if request.method == 'POST':
+            f = request.form
+            n = max(0, min(100, _safe_int(f.get('row_count')) or 0))
+            page_date = f.get('page_date') or datetime.now().strftime('%Y-%m-%d')
+            saved_count = 0
+            for i in range(n):
+                include = f.get(f'r_{i}_include')
+                if not include:
+                    continue
+                vehicle_no_val = (f.get(f'r_{i}_vehicle_no') or '').strip().upper()
+                _pg_ledger.create_ledger_entry(
+                    pg_session, ORG_ID,
+                    entry_date=page_date, gr_no=(f.get(f'r_{i}_gr_no') or '').strip(),
+                    vehicle_no=vehicle_no_val, station=f.get(f'r_{i}_station'),
+                    shipment_no=f.get(f'r_{i}_shipment_no'),
+                    trip_type=f.get(f'r_{i}_trip_type', 'One Way'),
+                    mt_qty=_safe_num(f.get(f'r_{i}_mt_qty')),
+                    freight=_safe_num(f.get(f'r_{i}_freight')) or 0,
+                    advance_cash=_safe_num(f.get(f'r_{i}_advance_cash')) or 0,
+                    advance_account=_safe_num(f.get(f'r_{i}_advance_account')) or 0,
+                    diesel=_safe_num(f.get(f'r_{i}_diesel')) or 0,
+                    remarks=f.get(f'r_{i}_remarks'),
+                )
+                _veh_conn = get_db()
+                remember_vehicle(_veh_conn, vehicle_no_val)
+                _veh_conn.commit()
+                _veh_conn.close()
+                saved_count += 1
+            _pg_ledger_extract.update_ledger_extraction(
+                pg_session, ORG_ID, le_id, status='used', edited_json=dict(f),
+            )
+            pg_session.commit()
+            flash(f'{saved_count} ledger row{"s" if saved_count != 1 else ""} saved.')
+            return redirect(url_for('ledger_index'))
+
+        extraction = {
+            'id': extraction_row.id, 'source_image': extraction_row.source_image,
+            'page_date': extraction_row.page_date, 'status': extraction_row.status,
+            'created_at': extraction_row.created_at,
+        }
+        extraction['parsed'] = extraction_row.raw_json or {}
+        return render_template('ledger_extract_review.html', extraction=extraction)
+
     conn = get_db()
     row = conn.execute('SELECT * FROM ledger_extractions WHERE id=?', (le_id,)).fetchone()
     if not row:
