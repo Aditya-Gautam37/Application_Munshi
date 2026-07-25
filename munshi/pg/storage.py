@@ -25,14 +25,25 @@ BUCKET = 'munshi-uploads'
 
 
 def _base_url():
-    url = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    # .strip() before .rstrip('/'): a trailing newline (e.g. from
+    # copy-pasting the value into Render's env var dashboard) isn't a '/',
+    # so rstrip('/') alone wouldn't remove it — and a URL/header value with
+    # an embedded '\n' fails outright (see _service_key()'s comment).
+    url = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
     if not url:
         raise RuntimeError('SUPABASE_URL is not set.')
     return url
 
 
 def _service_key():
-    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+    # Real bug hit in production (2026-07-25): SUPABASE_SERVICE_ROLE_KEY had
+    # a trailing '\n' in Render's env var dashboard (likely from a
+    # copy-paste). Python's http.client rejects any header value containing
+    # a newline outright — "Invalid header value b'...key...\n'" — which
+    # broke every Supabase Storage upload (challan/invoice/POD photos).
+    # .strip() here makes this class of copy-paste whitespace bug
+    # impossible regardless of how the env var gets set.
+    key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
     if not key:
         raise RuntimeError('SUPABASE_SERVICE_ROLE_KEY is not set.')
     return key
