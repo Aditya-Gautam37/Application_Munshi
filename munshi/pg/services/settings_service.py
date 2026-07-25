@@ -22,6 +22,18 @@ def get_setting(organization_id, key):
     return value if value is not None else ''
 
 
+def get_all_settings(organization_id):
+    """All settings for this org in a single round trip — used by app.py's
+    get_setting() to build a per-request cache (see its own docstring for
+    why: individual get_setting() calls add up to dozens per page render,
+    each a separate network round trip to Postgres)."""
+    session = pg_database.get_session()
+    rows = session.execute(
+        select(Setting.key, Setting.value).where(Setting.organization_id == organization_id)
+    ).all()
+    return {k: v for k, v in rows}
+
+
 def set_setting(organization_id, key, value):
     session = pg_database.get_session()
     row = session.execute(

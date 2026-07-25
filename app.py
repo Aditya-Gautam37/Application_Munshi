@@ -170,6 +170,22 @@ def get_db():
 
 @app.teardown_request
 def _close_request_db_conns(exc):
+    # PG_MODE: munshi/pg/database.py's own docstring says to call
+    # remove_session() at request teardown (documented at build time, never
+    # actually wired up here) — without it, a request that raises mid-query
+    # leaves that Postgres session in PendingRollbackError state, and
+    # because scoped_session is thread-local (reused across requests on the
+    # same gunicorn worker thread, not per-request), EVERY subsequent
+    # request handled by that worker fails the same way until the process
+    # restarts. Session.close() (what remove() calls) is always safe to
+    # call regardless of the session's current state — it rolls back any
+    # open/broken transaction and returns the connection to the pool.
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        try:
+            _pg_database.remove_session()
+        except Exception:
+            pass
     return _db_legacy.close_request_db_conns(exc)
 
 
@@ -829,8 +845,21 @@ def _ensure_archive_table(conn, src):
 
 
 def get_setting(key):
+    """PG_MODE: a single page render can call this dozens of times (every
+    context processor, every route reading defaults) — each call used to be
+    its own network round trip to Postgres, which is expensive given the
+    Tokyo-region pooler this deployment uses. Cached per-request on `g`
+    (fetched once, in one query, on first access) since Flask resets `g`
+    automatically at the start of every request — never stale across
+    requests. Falls back to the original single-key query when there's no
+    Flask request context (e.g. a background extraction thread), where
+    caching wouldn't help and `g` isn't available anyway."""
     if PG_MODE:
         from munshi.pg.services import settings_service as _pg_settings
+        if has_request_context():
+            if not hasattr(g, '_pg_settings_cache'):
+                g._pg_settings_cache = _pg_settings.get_all_settings(ORG_ID)
+            return g._pg_settings_cache.get(key, '')
         return _pg_settings.get_setting(ORG_ID, key)
     conn = get_db()
     row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
@@ -841,7 +870,10 @@ def get_setting(key):
 def set_setting(key, value):
     if PG_MODE:
         from munshi.pg.services import settings_service as _pg_settings
-        return _pg_settings.set_setting(ORG_ID, key, value)
+        _pg_settings.set_setting(ORG_ID, key, value)
+        if has_request_context() and hasattr(g, '_pg_settings_cache'):
+            g._pg_settings_cache[key] = value
+        return
     conn = get_db()
     conn.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', (key, value))
     conn.commit()
@@ -3960,7 +3992,14 @@ def inject_ai_status():
 # ── Notifications feed for the bell icon ──────────────────────────────────────
 @app.context_processor
 def inject_notifications():
-    """Compute pending alerts on every page render so the bell badge stays live."""
+    """Compute pending alerts on every page render so the bell badge stays live.
+       Only the logged-in app shell (base.html) shows the bell — /login,
+       /setup, /admin/login etc. render a standalone page that never
+       references `notifications`, so skip the (in PG_MODE: several remote
+       Postgres round-trip) computation entirely on those pages rather than
+       silently discarding the result."""
+    if not session.get('user'):
+        return {'notifications': {'entries': [], 'total': 0}}
     if PG_MODE:
         try:
             from sqlalchemy import text
