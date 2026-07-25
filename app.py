@@ -6657,7 +6657,13 @@ def ledger_pod(le_id):
                 pod_image_key = key
 
         before_vals = {name: float(getattr(entry, name) or 0) for name in _POD_ADJUSTMENT_FIELDS}
-        before_delivery_date = entry.delivery_date
+        # str(): entry.delivery_date is a real datetime.date from Postgres
+        # (unlike SQLite, which stores it as plain text) — a raw date
+        # object flowing into adj_changes below would fail to JSON-encode
+        # when AuditLog.changes (a JSONB column) gets written. Real bug
+        # hit in production (2026-07-25): "Object of type date is not JSON
+        # serializable" on every POD save.
+        before_delivery_date = str(entry.delivery_date) if entry.delivery_date else None
 
         adjustments = {
             name: (_safe_num(f.get(name)) if name in f else before_vals.get(name)) or 0

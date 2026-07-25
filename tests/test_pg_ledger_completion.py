@@ -174,7 +174,8 @@ def test_ledger_pod_with_photo_uploads_to_storage(seeded_entry):
 
 def test_ledger_pod_quick_tap_preserves_existing_adjustments(seeded_entry):
     """A quick 'Mark POD' tap from the list doesn't submit the adjustment
-    fields at all — must fall back to the existing value, never zero them."""
+    fields at all — must fall back to the existing value, never zero
+    them."""
     client, le_id, org_id = seeded_entry['client'], seeded_entry['le_id'], seeded_entry['org_id']
     token = _csrf(client)
     client.post(f'/ledger/{le_id}/pod', data={
@@ -190,6 +191,45 @@ def test_ledger_pod_quick_tap_preserves_existing_adjustments(seeded_entry):
     session = pg_database.get_session()
     entry = get_ledger_entry(session, org_id, le_id)
     assert float(entry.shortage) == 200.0
+
+
+def test_ledger_pod_resave_with_existing_delivery_date_does_not_crash(seeded_entry):
+    """Real production bug (2026-07-25): once delivery_date is set on a
+    prior save, entry.delivery_date comes back from Postgres as a real
+    datetime.date (unlike SQLite, which stores it as plain text). A SECOND
+    save that also submits delivery_date (even re-submitting the exact
+    same date, e.g. the modal pre-filling it from the existing entry)
+    compares that real date object against the newly-submitted STRING —
+    always "different" by type alone — pushing the raw date object into
+    the audit-log's JSONB `changes` column and crashing with "Object of
+    type date is not JSON serializable". The bug requires BOTH: an
+    already-populated delivery_date from a prior save, AND the second save
+    submitting a delivery_date value again (omitting it, as the quick-tap
+    test above does, never triggers the comparison at all)."""
+    client, le_id, org_id = seeded_entry['client'], seeded_entry['le_id'], seeded_entry['org_id']
+
+    token = _csrf(client)
+    first = client.post(f'/ledger/{le_id}/pod', data={
+        'csrf_token': token, 'pod_received': 'on', 'pod_date': '2026-07-20',
+        'delivery_date': '2026-07-21',
+    }, follow_redirects=False)
+    assert first.status_code == 302
+
+    token = _csrf(client)
+    second = client.post(f'/ledger/{le_id}/pod', data={
+        'csrf_token': token, 'pod_received': 'on', 'pod_date': '2026-07-20',
+        'delivery_date': '2026-07-22',
+    }, follow_redirects=False)
+    assert second.status_code == 302, (
+        'Re-saving POD on an entry with an already-set delivery_date failed — '
+        'likely the raw datetime.date-into-JSONB audit bug.'
+    )
+
+    from munshi.pg import database as pg_database
+    from munshi.pg.services.ledger_service import get_ledger_entry
+    session = pg_database.get_session()
+    entry = get_ledger_entry(session, org_id, le_id)
+    assert str(entry.delivery_date) == '2026-07-22'
 
 
 def test_ledger_amounts_updates_and_syncs_paid_mirror(seeded_entry):
