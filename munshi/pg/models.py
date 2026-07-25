@@ -373,6 +373,7 @@ class LedgerEntry(Base):
     pod_received: Mapped[bool] = mapped_column(Boolean, server_default='false')
     pod_date: Mapped[object | None] = mapped_column(Date)
     pod_image: Mapped[str | None] = mapped_column(Text)  # Supabase Storage object key
+    delivery_date: Mapped[object | None] = mapped_column(Date)
     paid: Mapped[bool] = mapped_column(Boolean, server_default='false')
     paid_date: Mapped[object | None] = mapped_column(Date)
     paid_mode: Mapped[str | None] = mapped_column(Text)
@@ -554,6 +555,7 @@ class LedgerEntryArchive(Base):
     pod_received: Mapped[bool | None] = mapped_column(Boolean)
     pod_date: Mapped[object | None] = mapped_column(Date)
     pod_image: Mapped[str | None] = mapped_column(Text)
+    delivery_date: Mapped[object | None] = mapped_column(Date)
     paid: Mapped[bool | None] = mapped_column(Boolean)
     paid_date: Mapped[object | None] = mapped_column(Date)
     paid_mode: Mapped[str | None] = mapped_column(Text)

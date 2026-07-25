@@ -214,21 +214,24 @@ def _bootstrap_from_seed_if_missing():
 
 
 def init_db():
+    # PG_MODE: bind the Postgres engine and stop — every route is now on
+    # Postgres, so the local SQLite file is never read or written by the
+    # hosted app. Deferred import — see PG_MODE's own comment above for why
+    # munshi.pg must never be imported unless this branch is actually taken
+    # (desktop build excludes psycopg/alembic/jwt). Everything below this
+    # point (seed bootstrap, schema creation, SQLite migrations, archive
+    # tables) is exclusively for the offline SQLite desktop build.
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        _pg_database.bind(os.environ['DATABASE_URL'])
+        return
+
     _bootstrap_from_seed_if_missing()
     # Rebind the SQLAlchemy engine (used by migrated domains) to whichever
     # DB_PATH is current right now — this is what lets tests/test_smoke.py's
     # "reassign DB_PATH, then call init_db()" pattern keep working with no
     # test-file changes as domains move onto SQLAlchemy sessions.
     _db_engine.bind(DB_PATH)
-    # PG_MODE: also bind the Postgres engine. Deferred import — see PG_MODE's
-    # own comment above for why munshi.pg must never be imported unless this
-    # branch is actually taken (desktop build excludes psycopg/alembic/jwt).
-    # The SQLite schema below still gets created either way: domains not yet
-    # migrated (challans, masters-diesel, reports, extraction, audit, backup)
-    # still run against it even in PG_MODE.
-    if PG_MODE:
-        from munshi.pg import database as _pg_database
-        _pg_database.bind(os.environ['DATABASE_URL'])
     conn = get_db()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS bills (
@@ -967,6 +970,15 @@ def remember_vehicle(conn, vehicle_no):
 
 
 def get_recipients():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import recipient_service as _pg_recipients
+        pg_session = _pg_database.get_session()
+        return [
+            {'name': r.name, 'address': r.address, 'gstin': r.gstin,
+             'state_code': r.state_code, 'freight_rate': float(r.freight_rate) if r.freight_rate is not None else None}
+            for r in _pg_recipients.list_recipients(pg_session, ORG_ID)
+        ]
     conn = get_db()
     rows = conn.execute(
         'SELECT name, address, gstin, state_code, freight_rate FROM recipients ORDER BY updated_at DESC'
@@ -976,6 +988,11 @@ def get_recipients():
 
 
 def get_vehicles():
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import vehicle_service as _pg_vehicles
+        pg_session = _pg_database.get_session()
+        return [v.vehicle_no for v in _pg_vehicles.list_vehicles(pg_session, ORG_ID)]
     conn = get_db()
     rows = conn.execute('SELECT vehicle_no FROM vehicles ORDER BY updated_at DESC').fetchall()
     conn.close()
@@ -1694,6 +1711,15 @@ REQUIRE_LICENSE = os.environ.get('MUNSHI_REQUIRE_LICENSE', '').strip().lower() i
 
 
 def _get_license_state():
+    if PG_MODE:
+        # The license-server phone-home kill-switch is a desktop-anti-piracy
+        # mechanism; a hosted deployment is fully under the owner's own
+        # control, so it's simply not applicable (see munshi/pg/models.py's
+        # Organization.subscription_status docstring — that column is the
+        # intended hosted-mode replacement, not this). Returning a fixed
+        # 'unconfigured' state keeps every caller (context processor, lockout
+        # check, /license page) working without ever touching SQLite.
+        return {'status': 'unconfigured'}
     conn = get_db()
     row = conn.execute('SELECT * FROM license_state WHERE id=1').fetchone()
     conn.close()
@@ -1702,6 +1728,8 @@ def _get_license_state():
 
 def _save_license_state(updates):
     """Update license_state singleton with `updates` dict."""
+    if PG_MODE:
+        return
     if not updates:
         return
     cols = ','.join(f'{k}=?' for k in updates)
@@ -1771,6 +1799,8 @@ def _phone_home_to_license_server():
 
 def _count_active_vehicles():
     """Simple truck-count metric for license server analytics."""
+    if PG_MODE:
+        return 0
     try:
         conn = get_db()
         n = conn.execute('SELECT COUNT(*) FROM vehicles').fetchone()[0]
@@ -1814,6 +1844,10 @@ def _enforce_license_lockout():
     """When license is locked/expired/suspended/not_found, block every POST/PUT/
        DELETE except the explicit auth + license-management allow-list.
        GET requests always pass — users keep read access to their own data."""
+    if PG_MODE:
+        # Desktop anti-piracy kill-switch, not applicable to a hosted
+        # deployment the owner directly controls — see _get_license_state().
+        return None
     ep = request.endpoint
     if ep is None or ep in _LICENSE_CHECK_EXEMPT:
         return None
@@ -1855,7 +1889,7 @@ def inject_drive_state():
 # Periodic phone-home: trigger from any request when last_checked_at is stale.
 @app.before_request
 def _maybe_phone_home():
-    if not LICENSE_SERVER_URL:
+    if PG_MODE or not LICENSE_SERVER_URL:
         return None
     if request.endpoint in ('static', 'extract_status', 'service_worker'):
         return None
@@ -1885,6 +1919,10 @@ def _maybe_daily_backup():
        Backoff: if the previous Drive sync errored, retry at most every 5
        minutes. Prevents a request burst (e.g. the extraction-polling page)
        from spawning a Drive-upload thread storm when Drive is unreachable."""
+    if PG_MODE:
+        # No local SQLite file worth backing up in PG_MODE — Supabase
+        # manages Postgres's own backups.
+        return None
     if request.endpoint in ('static', 'extract_status', 'service_worker'):
         return None
     today = datetime.now().strftime('%Y-%m-%d')
@@ -1960,6 +1998,9 @@ def license_page():
 
 @app.route('/license/set', methods=['POST'])
 def license_set():
+    if PG_MODE:
+        flash('License enforcement is not used on the hosted deployment.')
+        return redirect(url_for('license_page'))
     if current_user_role() != 'admin':
         flash('Only admins can change the license key.')
         return redirect(url_for('license_page'))
@@ -1974,6 +2015,9 @@ def license_set():
 
 @app.route('/license/check', methods=['POST'])
 def license_check_now():
+    if PG_MODE:
+        flash('License enforcement is not used on the hosted deployment.')
+        return redirect(url_for('license_page'))
     _phone_home_to_license_server()
     flash('License verification refreshed.')
     return redirect(url_for('license_page'))
@@ -2021,6 +2065,12 @@ def _drive_client_config():
 
 
 def _get_drive_state():
+    if PG_MODE:
+        # Backing up the local SQLite file to Drive is meaningless once
+        # Postgres is primary — Supabase manages Postgres's own backups.
+        # Fixed 'not_configured' state keeps every caller (context
+        # processor, connect/sync routes) safe without touching SQLite.
+        return {'last_sync_status': 'not_configured'}
     conn = get_db()
     row = conn.execute('SELECT * FROM google_drive_state WHERE id=1').fetchone()
     conn.close()
@@ -2028,6 +2078,8 @@ def _get_drive_state():
 
 
 def _save_drive_state(updates):
+    if PG_MODE:
+        return
     if not updates:
         return
     cols = ','.join(f'{k}=?' for k in updates)
@@ -2395,6 +2447,9 @@ def _restore_latest_backup_from_drive():
 @app.route('/settings/drive/connect')
 def drive_connect():
     """Start the OAuth flow: build auth URL with state, redirect to Google."""
+    if PG_MODE:
+        flash('Google Drive backup is not used on the hosted deployment — Supabase manages backups.')
+        return redirect(url_for('settings'))
     if current_user_role() != 'admin':
         flash('Only admins can connect Google Drive.')
         return redirect(url_for('settings'))
@@ -2419,6 +2474,9 @@ def drive_connect():
 @app.route('/oauth/google/callback')
 def drive_oauth_callback():
     """Verify state, exchange code for tokens, create folder, persist state."""
+    if PG_MODE:
+        flash('Google Drive backup is not used on the hosted deployment — Supabase manages backups.')
+        return redirect(url_for('settings'))
     if current_user_role() != 'admin':
         flash('Only admins can complete the Drive connection.')
         return redirect(url_for('settings'))
@@ -2477,6 +2535,9 @@ def drive_oauth_callback():
 
 @app.route('/settings/drive/disconnect', methods=['POST'])
 def drive_disconnect():
+    if PG_MODE:
+        flash('Google Drive backup is not used on the hosted deployment — Supabase manages backups.')
+        return redirect(url_for('settings'))
     if current_user_role() != 'admin':
         flash('Only admins can disconnect Google Drive.')
         return redirect(url_for('settings'))
@@ -2584,6 +2645,25 @@ def get_audit_for(entity, entity_id, limit=50):
 @app.route('/')
 def index():
     search = request.args.get('q', '').strip()
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        if search:
+            rows = pg_session.execute(text(
+                '''SELECT id, bill_no, bill_date, recipient_name, total_amount
+                   FROM bills WHERE organization_id=:org AND (bill_no ILIKE :q OR recipient_name ILIKE :q)
+                   ORDER BY id DESC'''),
+                {'org': ORG_ID, 'q': f'%{search}%'}).mappings().all()
+        else:
+            rows = pg_session.execute(text(
+                '''SELECT id, bill_no, bill_date, recipient_name, total_amount
+                   FROM bills WHERE organization_id=:org ORDER BY id DESC'''),
+                {'org': ORG_ID}).mappings().all()
+        return render_template('index.html', bills=rows, search=search)
+
     conn = get_db()
     if search:
         rows = conn.execute(
@@ -2604,7 +2684,6 @@ def index():
 def new_bill():
     if request.method == 'POST':
         f = request.form
-        conn = get_db()
 
         count = max(1, min(20, _safe_int(f.get('delivery_count')) or 1))   # clamped 1..20
         bill_date_val = f.get('bill_date', '')
@@ -2656,12 +2735,7 @@ def new_bill():
             # Bill numbering, GST split (compute_gst_split, called inside
             # create_bill — same function, not re-implemented), and the
             # bill<->ledger link all happen in Postgres via the already-
-            # tested bill_service. remember_recipient/remember_vehicle stay
-            # on the SQLite `conn` below — out of this round's scope
-            # (autocomplete memory). Audit now logs to BOTH Postgres (via
-            # audit_service, the real fix) and SQLite (the trailing
-            # log_audit(conn, ...) call further down, left in place rather
-            # than removed — harmless duplication, not a correctness issue).
+            # tested bill_service.
             from datetime import date as _date
             from munshi.pg import database as _pg_database
             from munshi.pg.services import audit_service as _pg_audit
@@ -2691,16 +2765,25 @@ def new_bill():
                 supplier_state=supplier_state,
                 from_ledger_id=from_le_id,
             )
+            bill_id = bill.id
             _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'bill', bill.id,
                                 summary=f'Created bill {bill.bill_no} for {recipient_name_val} · ₹{float(bill.total_amount):,.2f}',
                                 user=current_user())
             pg_session.commit()
-            bill_id, bill_no, total = bill.id, bill.bill_no, float(bill.total_amount)
+            from munshi.pg.services import recipient_service as _pg_recipients
+            from munshi.pg.services import vehicle_service as _pg_vehicles
+            _pg_recipients.remember_recipient(pg_session, ORG_ID, recipient_name_val,
+                                              f.get('recipient_address'), f.get('recipient_gstin'),
+                                              f.get('state_code'), freight_rate=f.get('d_freight_rate_0'))
+            _pg_vehicles.remember_vehicle(pg_session, ORG_ID, vehicle_no_val)
+            pg_session.commit()
+            return redirect(url_for('view_bill', bill_id=bill_id))
         else:
             # Allocate a collision-proof bill number and insert. If the number is
             # already taken (a racing save, or demo/imported data whose numbers ran
             # ahead of the counter), re-allocate from the current max and retry
             # rather than crashing with a UNIQUE-constraint 500.
+            conn = get_db()
             for _attempt in range(6):
                 bill_no, n = _alloc_bill_no(conn)
                 try:
@@ -2986,14 +3069,25 @@ def bill_einvoice_json(bill_id):
        Customer uploads this to the IRP / e-invoice portal (or hands to their GSP)
        to generate the IRN + signed QR. Returns Content-Disposition: attachment."""
     from flask import Response
-    conn = get_db()
-    row = conn.execute('SELECT * FROM bills WHERE id=?', (bill_id,)).fetchone()
-    conn.close()
-    if not row:
-        return jsonify({'error': 'Bill not found'}), 404
 
-    bill = dict(row)
-    deliveries = json.loads(bill['deliveries'] or '[]')
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Bill
+        pg_session = _pg_database.get_session()
+        bill_row = pg_session.get(Bill, bill_id)
+        if bill_row is None or str(bill_row.organization_id) != str(ORG_ID):
+            return jsonify({'error': 'Bill not found'}), 404
+        bill = {c.name: getattr(bill_row, c.name) for c in Bill.__table__.columns}
+        deliveries = bill['deliveries'] or []  # JSONB: already a list, not a JSON string
+    else:
+        conn = get_db()
+        row = conn.execute('SELECT * FROM bills WHERE id=?', (bill_id,)).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({'error': 'Bill not found'}), 404
+        bill = dict(row)
+        deliveries = json.loads(bill['deliveries'] or '[]')
+
     sup = get_supplier_identity()
     taxable = float(bill.get('taxable_value') or bill.get('total_amount') or 0)
     igst = float(bill.get('igst_amount') or 0)
@@ -3115,6 +3209,142 @@ def _extract_pincode(addr):
 
 @app.route('/bill/<int:bill_id>/edit', methods=['GET', 'POST'])
 def edit_bill(bill_id):
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Bill
+        from munshi.pg.services import audit_service as _pg_audit
+        pg_session = _pg_database.get_session()
+        bill_row = pg_session.get(Bill, bill_id)
+        if bill_row is None or str(bill_row.organization_id) != str(ORG_ID):
+            return 'Bill not found', 404
+
+        if request.method == 'POST':
+            f = request.form
+            count = max(1, min(20, _safe_int(f.get('delivery_count')) or 1))
+            bill_date_val = f.get('bill_date', '')
+            delivery_month_val = build_delivery_month(f.get('delivery_month_select', ''), bill_date_val)
+            vehicle_no_val = (f.get('vehicle_no') or '').strip().upper()
+            recipient_name_val = (f.get('recipient_name') or '').strip()
+            deliveries = []
+            for i in range(count):
+                deliveries.append({
+                    'sr_no':         i + 1,
+                    'gr_no':         f.get(f'd_gr_no_{i}', ''),
+                    'outward_no':    f.get(f'd_outward_no_{i}', ''),
+                    'outward_date':  f.get(f'd_outward_date_{i}', ''),
+                    'inward_no':     f.get(f'd_inward_no_{i}', ''),
+                    'inward_date':   f.get(f'd_inward_date_{i}', ''),
+                    'location':      f.get(f'd_location_{i}', ''),
+                    'consignee':     f.get(f'd_consignee_{i}', ''),
+                    'delivery_qty':  f.get(f'd_delivery_qty_{i}', ''),
+                    'converted_case':f.get(f'd_converted_case_{i}', ''),
+                    'inward_qty':    f.get(f'd_inward_qty_{i}', ''),
+                    'empty_qty':     f.get(f'd_empty_qty_{i}', ''),
+                    'weight':        f.get(f'd_weight_{i}', ''),
+                    'freight_rate':  f.get(f'd_freight_rate_{i}', ''),
+                    'overload':      f.get(f'd_overload_{i}', ''),
+                    'toll_tax':      f.get(f'd_toll_tax_{i}', ''),
+                    'excess_km':     f.get(f'd_excess_km_{i}', ''),
+                    'detention':     f.get(f'd_detention_{i}', ''),
+                    'unloading':     f.get(f'd_unloading_{i}', ''),
+                    'value_of_supply': f.get(f'd_value_of_supply_{i}', ''),
+                })
+            taxable_value = sum(_parse_amount(d['value_of_supply']) for d in deliveries)
+
+            hsn_sac         = (f.get('hsn_sac') or get_setting('default_hsn_sac') or '996511').strip()
+            place_of_supply = (f.get('place_of_supply') or f.get('state_code') or '').strip()
+            reverse_charge  = 1 if f.get('reverse_charge') else 0
+            gst_pct         = max(0, min(28, _safe_num(f.get('gst_pct')) or 0)) if not reverse_charge else 0
+            supplier_state  = get_setting('supplier_state_code') or '09'
+            tax = compute_gst_split(taxable_value, gst_pct or 0,
+                                    supplier_state, place_of_supply, reverse_charge)
+            total = tax['grand_total']
+
+            before = {'bill_date': str(bill_row.bill_date) if bill_row.bill_date else '',
+                     'recipient_name': bill_row.recipient_name,
+                     'recipient_address': bill_row.recipient_address,
+                     'recipient_gstin': bill_row.recipient_gstin,
+                     'state_code': bill_row.state_code, 'trip_type': bill_row.trip_type,
+                     'vehicle_no': bill_row.vehicle_no, 'delivery_month': bill_row.delivery_month,
+                     'client_name': bill_row.client_name,
+                     'total_amount': float(bill_row.total_amount) if bill_row.total_amount is not None else 0}
+            bill_no_for_summary = bill_row.bill_no
+
+            from datetime import date as _date
+            try:
+                bill_date_parsed = _date.fromisoformat(bill_date_val) if bill_date_val else None
+            except ValueError:
+                bill_date_parsed = None
+
+            bill_row.bill_date = bill_date_parsed
+            bill_row.recipient_name = recipient_name_val
+            bill_row.recipient_address = f.get('recipient_address')
+            bill_row.recipient_gstin = f.get('recipient_gstin')
+            bill_row.state_code = f.get('state_code')
+            bill_row.trip_type = f.get('trip_type')
+            bill_row.vehicle_no = vehicle_no_val
+            bill_row.freight_type = get_setting('freight_type')
+            bill_row.delivery_month = delivery_month_val
+            bill_row.client_name = f.get('client_name')
+            bill_row.total_amount = total
+            bill_row.deliveries = deliveries
+            bill_row.hsn_sac = hsn_sac
+            bill_row.taxable_value = taxable_value
+            bill_row.reverse_charge = bool(reverse_charge)
+            bill_row.place_of_supply = place_of_supply
+            bill_row.igst_pct = tax['igst_pct']
+            bill_row.cgst_pct = tax['cgst_pct']
+            bill_row.sgst_pct = tax['sgst_pct']
+            bill_row.igst_amount = tax['igst_amount']
+            bill_row.cgst_amount = tax['cgst_amount']
+            bill_row.sgst_amount = tax['sgst_amount']
+
+            from munshi.pg.services import recipient_service as _pg_recipients
+            from munshi.pg.services import vehicle_service as _pg_vehicles
+            _pg_recipients.remember_recipient(pg_session, ORG_ID, recipient_name_val,
+                                              f.get('recipient_address'), f.get('recipient_gstin'),
+                                              f.get('state_code'), freight_rate=f.get('d_freight_rate_0'))
+            _pg_vehicles.remember_vehicle(pg_session, ORG_ID, vehicle_no_val)
+
+            after = {
+                'bill_date': bill_date_val, 'recipient_name': recipient_name_val,
+                'recipient_address': f.get('recipient_address'),
+                'recipient_gstin': f.get('recipient_gstin'),
+                'state_code': f.get('state_code'), 'trip_type': f.get('trip_type'),
+                'vehicle_no': vehicle_no_val, 'delivery_month': delivery_month_val,
+                'client_name': f.get('client_name'), 'total_amount': total,
+            }
+            changes = _diff_dict(before, after, fields=after.keys())
+            if changes:
+                _pg_audit.log_audit(pg_session, ORG_ID, 'update', 'bill', bill_id,
+                                    summary=f'Edited bill {bill_no_for_summary} ({len(changes)} field{"s" if len(changes)!=1 else ""} changed)',
+                                    changes=changes, user=current_user())
+            pg_session.commit()
+            return redirect(url_for('view_bill', bill_id=bill_id))
+
+        bill = {c.name: getattr(bill_row, c.name) for c in Bill.__table__.columns}
+        bill['deliveries'] = bill['deliveries'] or []
+        bill['delivery_month_select'] = split_delivery_month(bill.get('delivery_month'))
+        clients = json.loads(get_setting('clients') or '[]')
+        return render_template('new_bill.html',
+            bill=bill,
+            next_bill_no=bill['bill_no'],
+            client_name=bill['client_name'],
+            vehicle_type=get_setting('vehicle_type'),
+            freight_type=get_setting('freight_type'),
+            clients=clients,
+            recipients=get_recipients(),
+            vehicles=get_vehicles(),
+            rate_list=get_rate_list(),
+            months=MONTHS,
+            today=bill['bill_date'],
+            edit=True,
+            default_hsn_sac=get_setting('default_hsn_sac') or '996511',
+            default_gst_pct=get_setting('default_gst_pct') or '5',
+            default_reverse_charge=(get_setting('default_reverse_charge') or '1') == '1',
+            gst_states=GST_STATE_NAMES,
+        )
+
     conn = get_db()
     row = conn.execute('SELECT * FROM bills WHERE id=?', (bill_id,)).fetchone()
     if not row:
@@ -3277,6 +3507,23 @@ def summary():
         if not ids:
             flash('Please select at least one bill.')
             return redirect(url_for('summary'))
+
+        if PG_MODE:
+            from sqlalchemy import text
+
+            from munshi.pg import database as _pg_database
+            pg_session = _pg_database.get_session()
+            rows = pg_session.execute(text(
+                'SELECT * FROM bills WHERE organization_id=:org AND id = ANY(:ids) ORDER BY bill_no'),
+                {'org': ORG_ID, 'ids': [int(i) for i in ids]}).mappings().all()
+            bills = []
+            for r in rows:
+                b = dict(r)
+                b['deliveries'] = b['deliveries'] or []  # JSONB: already a list
+                bills.append(b)
+            grand_total = sum(_parse_amount(b['total_amount']) for b in bills)
+            return render_template('summary_view.html', bills=bills, grand_total=grand_total)
+
         conn = get_db()
         placeholders = ','.join('?' * len(ids))
         rows = conn.execute(
@@ -3290,6 +3537,16 @@ def summary():
             bills.append(b)
         grand_total = sum(_parse_amount(b['total_amount']) for b in bills)
         return render_template('summary_view.html', bills=bills, grand_total=grand_total)
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        rows = pg_session.execute(text(
+            'SELECT id, bill_no, bill_date, recipient_name, total_amount FROM bills '
+            'WHERE organization_id=:org ORDER BY id DESC'), {'org': ORG_ID}).mappings().all()
+        return render_template('summary.html', bills=rows)
 
     conn = get_db()
     rows = conn.execute(
@@ -3704,6 +3961,68 @@ def inject_ai_status():
 @app.context_processor
 def inject_notifications():
     """Compute pending alerts on every page render so the bell badge stays live."""
+    if PG_MODE:
+        try:
+            from sqlalchemy import text
+
+            from munshi.pg import database as _pg_database
+            pg_session = _pg_database.get_session()
+            items = []
+            overdue_days = int(get_setting('pod_overdue_days') or 10)
+            from datetime import timedelta
+            cutoff = (datetime.now().date() - timedelta(days=overdue_days)).isoformat()
+            params = {'org': ORG_ID}
+
+            n_overdue = pg_session.execute(text(
+                'SELECT COUNT(*) FROM ledger_entries '
+                'WHERE organization_id=:org AND pod_received=false AND entry_date < :cutoff'),
+                {**params, 'cutoff': cutoff}).scalar()
+            if n_overdue > 0:
+                items.append({
+                    'icon': 'bi-exclamation-triangle-fill', 'color': 'danger',
+                    'title': f'{n_overdue} overdue POD' + ('s' if n_overdue != 1 else ''),
+                    'meta': f'no POD received after {overdue_days} days',
+                    'link': url_for('ledger_index', status='pod_pending'),
+                })
+
+            n_ready = pg_session.execute(text(
+                'SELECT COUNT(*) FROM ledger_entries '
+                'WHERE organization_id=:org AND pod_received=true AND bill_id IS NULL'), params).scalar()
+            if n_ready > 0:
+                items.append({
+                    'icon': 'bi-receipt-cutoff', 'color': 'success',
+                    'title': f'{n_ready} entr{"ies" if n_ready != 1 else "y"} ready to bill',
+                    'meta': 'POD received — create bills',
+                    'link': url_for('ready_to_bill'),
+                })
+
+            unpaid = pg_session.execute(text(
+                'SELECT COUNT(DISTINCT recipient_name) FROM bills '
+                'WHERE organization_id=:org AND recipient_name IS NOT NULL'), params).scalar()
+            clients_with_balance = list_clients_with_balance() if unpaid else []
+            n_unpaid = sum(1 for c in clients_with_balance if c['balance'] > 0.005)
+            if n_unpaid > 0:
+                items.append({
+                    'icon': 'bi-cash-coin', 'color': 'warning',
+                    'title': f'{n_unpaid} client{"s" if n_unpaid != 1 else ""} with pending balance',
+                    'meta': 'collect outstanding payments',
+                    'link': url_for('payments_hub'),
+                })
+
+            n_drafts = pg_session.execute(text(
+                "SELECT COUNT(*) FROM challans WHERE organization_id=:org AND status='draft'"), params).scalar()
+            if n_drafts > 0:
+                items.append({
+                    'icon': 'bi-clipboard2-pulse', 'color': 'info',
+                    'title': f'{n_drafts} draft challan{"s" if n_drafts != 1 else ""}',
+                    'meta': 'review and save',
+                    'link': url_for('challans_index'),
+                })
+
+            return {'notifications': {'entries': items, 'total': len(items)}}
+        except Exception:
+            return {'notifications': {'entries': [], 'total': 0}}
+
     try:
         conn = get_db()
         items = []
@@ -5467,10 +5786,8 @@ def challan_review(challan_id):
                 return 'Challan not found', 404
 
             _pg_drivers.get_or_create_driver(pg_session, ORG_ID, f.get('driver_name'), f.get('driver_mobile'))
-            _veh_conn = get_db()
-            remember_vehicle(_veh_conn, truck_no_val)
-            _veh_conn.commit()
-            _veh_conn.close()
+            from munshi.pg.services import vehicle_service as _pg_vehicles
+            _pg_vehicles.remember_vehicle(pg_session, ORG_ID, truck_no_val)
 
             action_type = 'create' if new_entry is not None else 'update'
             _pg_audit.log_audit(
@@ -5710,6 +6027,27 @@ def remember_diesel_vendor(conn, name):
 # ── /masters — combined Transporters + Diesel Vendors page ─────────────────
 @app.route('/masters')
 def masters_index():
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        transporters = get_transporters()
+        for t in transporters:
+            t['trip_count'] = pg_session.execute(text(
+                'SELECT COUNT(*) FROM ledger_entries WHERE organization_id=:org AND transporter_id=:id'),
+                {'org': ORG_ID, 'id': t['id']}).scalar()
+            t['balance'] = get_party_balance('transporter', t['id'])
+        diesel_vendors = get_diesel_vendors()
+        for v in diesel_vendors:
+            v['trip_count'] = pg_session.execute(text(
+                'SELECT COUNT(*) FROM ledger_entries WHERE organization_id=:org AND diesel_vendor_id=:id AND diesel > 0'),
+                {'org': ORG_ID, 'id': v['id']}).scalar()
+            v['balance'] = get_party_balance('diesel_vendor', v['id'])
+        return render_template('masters.html',
+                               transporters=transporters,
+                               diesel_vendors=diesel_vendors)
+
     conn = get_db()
     transporters = get_transporters()
     for t in transporters:
@@ -5902,6 +6240,48 @@ def _is_overdue(entry_date_iso, pod_received, threshold_days):
 @app.route('/ledger')
 def ledger_index():
     f = request.args
+    overdue_days = int(get_setting('pod_overdue_days') or 10)
+
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        where, params = ['le.organization_id=:org'], {'org': ORG_ID}
+        if f.get('q'):
+            where.append('(le.gr_no ILIKE :q OR le.vehicle_no ILIKE :q OR le.station ILIKE :q)')
+            params['q'] = f'%{f["q"].strip()}%'
+        if f.get('from'):
+            where.append('le.entry_date >= :df'); params['df'] = f['from']
+        if f.get('to'):
+            where.append('le.entry_date <= :dt'); params['dt'] = f['to']
+        if f.get('status') == 'pod_pending':
+            where.append('le.pod_received = false')
+        elif f.get('status') == 'unpaid':
+            where.append('le.paid = false')
+        elif f.get('status') == 'paid':
+            where.append('le.paid = true')
+
+        sql = f'''
+          SELECT le.*, t.name AS transporter_name, dv.name AS diesel_vendor_name
+          FROM ledger_entries le
+          LEFT JOIN transporters   t  ON t.id = le.transporter_id
+          LEFT JOIN diesel_vendors dv ON dv.id = le.diesel_vendor_id
+          WHERE {" AND ".join(where)}
+          ORDER BY le.entry_date DESC, le.id DESC
+          LIMIT 500
+        '''
+        rows = pg_session.execute(text(sql), params).mappings().all()
+        entries = []
+        for row in rows:
+            e = dict(row)
+            e['balance'] = _ledger_balance(e)
+            e['overdue'] = _is_overdue(str(e['entry_date']) if e['entry_date'] else '',
+                                       e['pod_received'], overdue_days)
+            entries.append(e)
+        return render_template('ledger_index.html',
+                               entries=entries, filters=dict(f), overdue_days=overdue_days)
+
     where = ['1=1']
     params = []
     if f.get('q'):
@@ -5932,7 +6312,6 @@ def ledger_index():
     rows = conn.execute(sql, params).fetchall()
     conn.close()
 
-    overdue_days = int(get_setting('pod_overdue_days') or 10)
     entries = []
     for r in rows:
         e = dict(r)
@@ -5969,6 +6348,18 @@ def ledger_check_gr():
     """Live duplicate-GR check for the New/Edit Entry form (called on blur)."""
     gr_no = request.args.get('gr_no', '')
     exclude_id = request.args.get('exclude_id', type=int)
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+        dupes = _pg_ledger.find_duplicate_gr(pg_session, ORG_ID, gr_no, exclude_id)
+        return jsonify({'duplicates': [
+            {'id': d['id'], 'entry_date': str(d['entry_date']) if d['entry_date'] else None,
+             'vehicle_no': d['vehicle_no'], 'freight': float(d['freight']) if d['freight'] is not None else None}
+            for d in dupes
+        ]})
+
     conn = get_db()
     dupes = _find_duplicate_gr(conn, gr_no, exclude_id)
     conn.close()
@@ -6023,6 +6414,9 @@ def _ledger_save_new():
             {'org': ORG_ID, 'gr': gr_no, 'eid': new_id},
         ).fetchone() if gr_no else None
         dupes = [{'id': dupe_row[0], 'entry_date': dupe_row[1], 'vehicle_no': dupe_row[2]}] if dupe_row else []
+        from munshi.pg.services import vehicle_service as _pg_vehicles
+        _pg_vehicles.remember_vehicle(pg_session, ORG_ID, vehicle_no)
+        pg_session.commit()
     else:
         conn = get_db()
         diesel_vendor_id = remember_diesel_vendor(conn, f.get('diesel_vendor_name'))
@@ -6044,17 +6438,9 @@ def _ledger_save_new():
         ))
         new_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         dupes = _find_duplicate_gr(conn, gr_no, exclude_id=new_id)
+        remember_vehicle(conn, vehicle_no)
         conn.commit()
         conn.close()
-
-    # remember_vehicle's autocomplete memory stays on SQLite regardless of
-    # PG_MODE (out of this round's scope, same as remember_recipient) — its
-    # own short-lived connection, since PG_MODE's branch above already
-    # closed its Postgres session, not a SQLite one.
-    _veh_conn = get_db()
-    remember_vehicle(_veh_conn, vehicle_no)
-    _veh_conn.commit()
-    _veh_conn.close()
 
     flash(f'Ledger entry GR-{gr_no or new_id} saved.')
     if dupes:
@@ -6095,11 +6481,9 @@ def ledger_view(le_id):
             if entry is None:
                 pg_session.rollback()
                 return 'Ledger entry not found', 404
+            from munshi.pg.services import vehicle_service as _pg_vehicles
+            _pg_vehicles.remember_vehicle(pg_session, ORG_ID, vehicle_no)
             pg_session.commit()
-            _veh_conn = get_db()
-            remember_vehicle(_veh_conn, vehicle_no)
-            _veh_conn.commit()
-            _veh_conn.close()
             # Audit diff and duplicate-GR heads-up are deferred in PG_MODE
             # this round, same as bills — see the plan doc.
             flash('Ledger entry updated.')
@@ -6211,6 +6595,83 @@ def ledger_pod(le_id):
     pod_received = 1 if f.get('pod_received') else 0
     pod_date = f.get('pod_date') or datetime.now().strftime('%Y-%m-%d')
 
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import ledger_service as _pg_ledger
+        from munshi.pg.services import payment_service as _pg_payments
+        pg_session = _pg_database.get_session()
+        entry = _pg_ledger.get_ledger_entry(pg_session, ORG_ID, le_id)
+        if entry is None:
+            flash('Ledger entry not found.')
+            return redirect(url_for('ledger_index'))
+
+        pod_image_key = None
+        file = request.files.get('pod_image')
+        if file and file.filename:
+            ext = Path(file.filename).suffix.lower()
+            if ext in ALLOWED_EXTS:
+                from munshi.pg import storage as _pg_storage
+                key = f'{ORG_ID}/pods/pod_{le_id}_{uuid.uuid4().hex[:8]}{ext}'
+                _pg_storage.upload_bytes(key, file.read(),
+                                         content_type=file.mimetype or 'application/octet-stream')
+                pod_image_key = key
+
+        before_vals = {name: float(getattr(entry, name) or 0) for name in _POD_ADJUSTMENT_FIELDS}
+        before_delivery_date = entry.delivery_date
+
+        adjustments = {
+            name: (_safe_num(f.get(name)) if name in f else before_vals.get(name)) or 0
+            for name in _POD_ADJUSTMENT_FIELDS
+        }
+        delivery_date = f.get('delivery_date') if 'delivery_date' in f else before_delivery_date
+
+        update_fields = dict(
+            pod_received=bool(pod_received), pod_date=pod_date or None,
+            delivery_date=delivery_date or None, **adjustments,
+        )
+        if pod_image_key:
+            update_fields['pod_image'] = pod_image_key
+
+        updated_entry, before = _pg_ledger.update_pod(pg_session, ORG_ID, le_id, **update_fields)
+
+        adj_changes = _diff_dict(
+            {**before_vals, 'delivery_date': before_delivery_date},
+            {**adjustments, 'delivery_date': delivery_date},
+            fields=list(_POD_ADJUSTMENT_FIELDS) + ['delivery_date'],
+        )
+        if bool(before['pod_received']) != bool(pod_received):
+            action = 'POD received' if pod_received else 'POD un-marked'
+            if pod_image_key and pod_received:
+                action += ' (with photo)'
+            _pg_audit.log_audit(pg_session, ORG_ID, 'pod_mark', 'ledger_entry', le_id,
+                                summary=f'{action} for GR-{before["gr_no"] or le_id} on {pod_date}',
+                                changes=adj_changes or None, user=current_user())
+        elif pod_image_key:
+            _pg_audit.log_audit(pg_session, ORG_ID, 'pod_mark', 'ledger_entry', le_id,
+                                summary=f'POD photo added for GR-{before["gr_no"] or le_id}',
+                                changes=adj_changes or None, user=current_user())
+        elif adj_changes:
+            _pg_audit.log_audit(pg_session, ORG_ID, 'pod_mark', 'ledger_entry', le_id,
+                                summary=f'Settlement adjustments updated for GR-{before["gr_no"] or le_id}',
+                                changes=adj_changes, user=current_user())
+
+        if before['paid'] and before['transporter_id']:
+            new_net = _pg_ledger.ledger_balance(updated_entry)
+            amt = float(before['paid_amount']) if before['paid_amount'] else new_net
+            _pg_payments.auto_payment_upsert(
+                pg_session, ORG_ID, 'transporter', before['transporter_id'], amt,
+                f'auto-paid:ledger:{le_id}', when=before['paid_date'], mode=before['paid_mode'],
+                created_by=current_user(),
+            )
+
+        pg_session.commit()
+        flash('POD status updated.')
+        ref = request.referrer or ''
+        if '/ledger' in ref and f'/ledger/{le_id}' not in ref:
+            return redirect(url_for('ledger_index'))
+        return redirect(url_for('ledger_view', le_id=le_id))
+
     pod_image_rel = None
     file = request.files.get('pod_image')
     if file and file.filename:
@@ -6317,6 +6778,47 @@ _LEDGER_AMOUNT_FIELDS = ('freight', 'advance_cash', 'advance_account', 'diesel')
 @app.route('/ledger/<int:le_id>/amounts', methods=['POST'])
 def ledger_amounts(le_id):
     f = request.form
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import ledger_service as _pg_ledger
+        from munshi.pg.services import payment_service as _pg_payments
+        pg_session = _pg_database.get_session()
+        entry = _pg_ledger.get_ledger_entry(pg_session, ORG_ID, le_id)
+        if entry is None:
+            return 'Ledger entry not found', 404
+
+        before_vals = {name: float(getattr(entry, name) or 0) for name in _LEDGER_AMOUNT_FIELDS}
+        amounts = {}
+        for name in _LEDGER_AMOUNT_FIELDS:
+            submitted = _safe_num(f.get(name)) if name in f else None
+            amounts[name] = submitted if submitted is not None else before_vals.get(name, 0)
+
+        updated_entry, before = _pg_ledger.update_amounts(pg_session, ORG_ID, le_id, **amounts)
+
+        changes = _diff_dict(before_vals, amounts, fields=list(_LEDGER_AMOUNT_FIELDS))
+        if changes:
+            _pg_audit.log_audit(pg_session, ORG_ID, 'update', 'ledger_entry', le_id,
+                                summary=f'Amounts updated for GR-{before["gr_no"] or le_id}',
+                                changes=changes, user=current_user())
+
+        if before['paid'] and before['transporter_id']:
+            new_net = _pg_ledger.ledger_balance(updated_entry)
+            amt = float(before['paid_amount']) if before['paid_amount'] else new_net
+            _pg_payments.auto_payment_upsert(
+                pg_session, ORG_ID, 'transporter', before['transporter_id'], amt,
+                f'auto-paid:ledger:{le_id}', when=before['paid_date'], mode=before['paid_mode'],
+                created_by=current_user(),
+            )
+
+        pg_session.commit()
+        flash('Amounts updated.')
+        ref = request.referrer or ''
+        if '/ledger' in ref and f'/ledger/{le_id}' not in ref:
+            return redirect(url_for('ledger_index'))
+        return redirect(url_for('ledger_view', le_id=le_id))
+
     conn = get_db()
     before_row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
     if not before_row:
@@ -6495,6 +6997,19 @@ def ledger_bulk_pod():
         flash('Select at least one entry first.')
         return redirect(url_for('ledger_index'))
     today = datetime.now().strftime('%Y-%m-%d')
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+        affected = _pg_ledger.bulk_mark_pod(pg_session, ORG_ID, ids, today)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'bulk_pod', 'ledger_entry', 0,
+                            summary=f'Marked POD received for {affected} entries', user=current_user())
+        pg_session.commit()
+        flash(f'Marked {affected} ledger entr{"y" if affected == 1 else "ies"} as POD received.')
+        return redirect(url_for('ledger_index'))
+
     conn = get_db()
     placeholders = ','.join(['?'] * len(ids))
     conn.execute(
@@ -6519,6 +7034,29 @@ def ledger_bulk_paid():
         flash('Select at least one entry first.')
         return redirect(url_for('ledger_index'))
     today = datetime.now().strftime('%Y-%m-%d')
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import ledger_service as _pg_ledger
+        from munshi.pg.services import payment_service as _pg_payments
+        pg_session = _pg_database.get_session()
+        newly_paid = _pg_ledger.bulk_mark_paid(pg_session, ORG_ID, ids, today, mode)
+        for entry in newly_paid:
+            if not entry.transporter_id:
+                continue
+            net = _pg_ledger.ledger_balance(entry)
+            _pg_payments.auto_payment_upsert(
+                pg_session, ORG_ID, 'transporter', entry.transporter_id, net,
+                f'auto-paid:ledger:{entry.id}', when=today, mode=mode, created_by=current_user(),
+            )
+        affected = len(newly_paid)
+        _pg_audit.log_audit(pg_session, ORG_ID, 'bulk_paid', 'ledger_entry', 0,
+                            summary=f'Marked {affected} entries paid ({mode})', user=current_user())
+        pg_session.commit()
+        flash(f'Marked {affected} ledger entr{"y" if affected == 1 else "ies"} as paid ({mode}).')
+        return redirect(url_for('ledger_index'))
+
     conn = get_db()
     placeholders = ','.join(['?'] * len(ids))
     # Capture the rows we're about to flip (still unpaid) so we can write one
@@ -6553,6 +7091,22 @@ def ledger_bulk_paid():
 def ledger_duplicate(le_id):
     """Clone a ledger row for a recurring trip. Resets identifiers and POD/paid
        state, keeps freight/advance/diesel/vehicle/station/transporter."""
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import ledger_service as _pg_ledger
+        pg_session = _pg_database.get_session()
+        today = datetime.now().strftime('%Y-%m-%d')
+        new_entry = _pg_ledger.duplicate_entry(pg_session, ORG_ID, le_id, today)
+        if new_entry is None:
+            flash('Ledger entry not found.')
+            return redirect(url_for('ledger_index'))
+        _pg_audit.log_audit(pg_session, ORG_ID, 'create', 'ledger_entry', new_entry.id,
+                            summary=new_entry.remarks, user=current_user())
+        pg_session.commit()
+        flash('Trip duplicated. Fill in the new GR No. and any changes.')
+        return redirect(url_for('ledger_view', le_id=new_entry.id))
+
     conn = get_db()
     row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
     if not row:
@@ -6828,10 +7382,8 @@ def ledger_extract_review(le_id):
                     diesel=_safe_num(f.get(f'r_{i}_diesel')) or 0,
                     remarks=f.get(f'r_{i}_remarks'),
                 )
-                _veh_conn = get_db()
-                remember_vehicle(_veh_conn, vehicle_no_val)
-                _veh_conn.commit()
-                _veh_conn.close()
+                from munshi.pg.services import vehicle_service as _pg_vehicles
+                _pg_vehicles.remember_vehicle(pg_session, ORG_ID, vehicle_no_val)
                 saved_count += 1
             _pg_ledger_extract.update_ledger_extraction(
                 pg_session, ORG_ID, le_id, status='used', edited_json=dict(f),
@@ -6919,6 +7471,22 @@ def ledger_extract_review(le_id):
 @app.route('/to-bill')
 def ready_to_bill():
     """Ledger entries that are POD-received and not yet billed."""
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        rows = pg_session.execute(text('''
+          SELECT le.*, c.lr_no AS challan_lr, c.consignee_name AS challan_consignee,
+                 c.invoice_no AS challan_invoice, c.invoice_date AS challan_inv_date,
+                 c.weight_kg AS challan_weight
+          FROM ledger_entries le
+          LEFT JOIN challans c ON c.id = le.challan_id AND c.organization_id = le.organization_id
+          WHERE le.organization_id=:org AND le.pod_received = true AND le.bill_id IS NULL
+          ORDER BY le.entry_date DESC, le.id DESC
+        '''), {'org': ORG_ID}).mappings().all()
+        return render_template('to_bill.html', entries=[dict(r) for r in rows])
+
     conn = get_db()
     rows = conn.execute('''
       SELECT le.*, c.lr_no AS challan_lr, c.consignee_name AS challan_consignee,
@@ -6936,6 +7504,81 @@ def ready_to_bill():
 def _build_prefill_from_ledger(le_id):
     """Read a ledger entry + its challan and build the same (bill_dict, deliveries) shape
        that _build_prefill_from_extraction produces, so /bill/new can render with bill=bill_dict."""
+    if PG_MODE:
+        from sqlalchemy import text
+
+        from munshi.pg import database as _pg_database
+        pg_session = _pg_database.get_session()
+        le_row = pg_session.execute(text(
+            'SELECT * FROM ledger_entries WHERE organization_id=:org AND id=:id'),
+            {'org': ORG_ID, 'id': le_id}).mappings().fetchone()
+        if not le_row:
+            return None, []
+        le = dict(le_row)
+        for k in ('mt_qty', 'weight_kg'):
+            if le.get(k) is not None:
+                le[k] = float(le[k])
+        challan = None
+        if le.get('challan_id'):
+            c_row = pg_session.execute(text(
+                'SELECT * FROM challans WHERE organization_id=:org AND id=:id'),
+                {'org': ORG_ID, 'id': le['challan_id']}).mappings().fetchone()
+            if c_row:
+                challan = dict(c_row)
+                if challan.get('weight_kg') is not None:
+                    challan['weight_kg'] = float(challan['weight_kg'])
+        recipient = None
+        consignee_name = (challan.get('consignee_name') if challan else '') or ''
+        if consignee_name:
+            r = pg_session.execute(text(
+                'SELECT * FROM recipients WHERE organization_id=:org AND LOWER(name)=LOWER(:name)'),
+                {'org': ORG_ID, 'name': consignee_name}).mappings().fetchone()
+            if r:
+                recipient = dict(r)
+
+        weight_kg = le.get('mt_qty', 0) or 0
+        if weight_kg and weight_kg < 1000:
+            weight_kg = weight_kg * 1000.0
+        if not weight_kg and challan and challan.get('weight_kg'):
+            weight_kg = challan['weight_kg']
+
+        bill_pre = {
+            'bill_date': str(le.get('entry_date')) if le.get('entry_date') else datetime.now().strftime('%Y-%m-%d'),
+            'recipient_name': consignee_name,
+            'recipient_address': (recipient or {}).get('address', '') or
+                                 (challan or {}).get('consignee_address', ''),
+            'recipient_gstin': (recipient or {}).get('gstin', ''),
+            'state_code': (recipient or {}).get('state_code', '')
+                           or ((recipient or {}).get('gstin', '') or '')[:2],
+            'trip_type': le.get('trip_type', 'One Way'),
+            'vehicle_no': le.get('vehicle_no') or (challan or {}).get('truck_no', ''),
+            'delivery_month': '',
+            'delivery_month_select': '',
+        }
+        delivery = {
+            'sr_no':            1,
+            'gr_no':            le.get('gr_no') or (challan or {}).get('lr_no', ''),
+            'outward_no':       le.get('shipment_no') or (challan or {}).get('invoice_no', ''),
+            'outward_date':     str((challan or {}).get('invoice_date') or '') or str(le.get('entry_date') or ''),
+            'inward_no':        '',
+            'inward_date':      '',
+            'location':         le.get('station', ''),
+            'consignee':        consignee_name,
+            'delivery_qty':     '',
+            'converted_case':   '',
+            'inward_qty':       '',
+            'empty_qty':        '',
+            'weight':           weight_kg,
+            'freight_rate':     '',
+            'overload':         '',
+            'toll_tax':         '',
+            'excess_km':        '',
+            'detention':        '',
+            'unloading':        '',
+            'value_of_supply':  '',
+        }
+        return bill_pre, [delivery]
+
     conn = get_db()
     le_row = conn.execute('SELECT * FROM ledger_entries WHERE id=?', (le_id,)).fetchone()
     if not le_row:
@@ -7014,6 +7657,56 @@ def _build_prefill_from_ledger(le_id):
 def bill_client_paid(bill_id):
     f = request.form
     is_paid = 1 if f.get('client_paid') else 0
+
+    if PG_MODE:
+        from munshi.pg import database as _pg_database
+        from munshi.pg.models import Bill
+        from munshi.pg.services import audit_service as _pg_audit
+        from munshi.pg.services import payment_service as _pg_payments
+        pg_session = _pg_database.get_session()
+        bill = pg_session.get(Bill, bill_id)
+        if bill is None or str(bill.organization_id) != str(ORG_ID):
+            flash('Bill not found.')
+            return redirect(url_for('index'))
+
+        before_client_paid = bool(bill.client_paid)
+        before_bill_no = bill.bill_no
+        before_recipient_name = bill.recipient_name
+        before_total_amount = bill.total_amount
+        ref = f'auto-paid:bill:{bill_id}'
+
+        if is_paid:
+            bill.client_paid = True
+            bill.client_paid_date = f.get('client_paid_date') or datetime.now().strftime('%Y-%m-%d')
+            bill.client_paid_mode = f.get('client_paid_mode')
+            bill.client_paid_amount = _safe_num(f.get('client_paid_amount'))
+            bill.client_paid_reference = f.get('client_paid_reference')
+            amt = _safe_num(f.get('client_paid_amount')) or float(before_total_amount or 0)
+            _pg_payments.auto_payment_upsert(
+                pg_session, ORG_ID, 'client', (before_recipient_name or '').strip(), amt, ref,
+                when=f.get('client_paid_date'), mode=f.get('client_paid_mode'), created_by=current_user(),
+            )
+        else:
+            bill.client_paid = False
+            bill.client_paid_date = None
+            bill.client_paid_mode = None
+            bill.client_paid_amount = None
+            bill.client_paid_reference = None
+            _pg_payments.auto_payment_remove(pg_session, ORG_ID, ref)
+
+        if before_client_paid != bool(is_paid):
+            action = 'Client marked paid' if is_paid else 'Client payment un-marked'
+            details = []
+            if is_paid and f.get('client_paid_mode'):   details.append(f.get('client_paid_mode'))
+            if is_paid and f.get('client_paid_amount'): details.append(f'₹{f.get("client_paid_amount")}')
+            suffix = f' ({" · ".join(details)})' if details else ''
+            _pg_audit.log_audit(pg_session, ORG_ID, 'client_paid', 'bill', bill_id,
+                                summary=f'{action}{suffix} for {before_bill_no or bill_id}', user=current_user())
+
+        pg_session.commit()
+        flash('Client payment status updated.')
+        return redirect(url_for('view_bill', bill_id=bill_id))
+
     conn = get_db()
     before_row = conn.execute(
         'SELECT client_paid, bill_no, recipient_name, total_amount FROM bills WHERE id=?',
@@ -7972,6 +8665,8 @@ def backup_db_if_needed():
     """Create a dated copy of bills.db once per day. Keep last 14 local backups,
        and (if Google Drive is connected) upload the same file to the customer's
        own Drive folder in a background daemon thread."""
+    if PG_MODE:
+        return
     if not os.path.exists(DB_PATH):
         return
     today = datetime.now().strftime('%Y-%m-%d')
@@ -8090,6 +8785,34 @@ def _backup_health():
 def health():
     """Lightweight status check — DB reachable, AI key configured, recent backup, etc."""
     status = {'ok': True, 'checks': {}}
+
+    if PG_MODE:
+        from sqlalchemy import text
+        try:
+            from munshi.pg import database as _pg_database
+            pg_session = _pg_database.get_session()
+            bill_count = pg_session.execute(text(
+                'SELECT COUNT(*) FROM bills WHERE organization_id=:org'), {'org': ORG_ID}).scalar()
+            ledger_count = pg_session.execute(text(
+                'SELECT COUNT(*) FROM ledger_entries WHERE organization_id=:org'), {'org': ORG_ID}).scalar()
+            rate_count = pg_session.execute(text(
+                'SELECT COUNT(*) FROM freight_rates WHERE organization_id=:org'), {'org': ORG_ID}).scalar()
+            status['checks']['db'] = {'ok': True, 'backend': 'postgres', 'bills': bill_count,
+                                       'ledger_entries': ledger_count, 'rate_rows': rate_count}
+        except Exception as e:
+            status['ok'] = False
+            status['checks']['db'] = {'ok': False, 'backend': 'postgres', 'error': str(e)[:200]}
+
+        key = os.environ.get('GOOGLE_API_KEY', '').strip()
+        status['checks']['ai'] = {
+            'configured': bool(key) and not key.startswith('PASTE_'),
+            'model': os.environ.get('GEMINI_MODEL', 'gemini-flash-latest'),
+        }
+        # No local-file backup concept in PG_MODE — Supabase manages Postgres
+        # backups itself; not an error condition, just a different mechanism.
+        status['checks']['backups'] = {'managed_by': 'Supabase (Postgres)'}
+        return jsonify(status)
+
     # DB reachable
     try:
         conn = get_db()
@@ -8157,6 +8880,10 @@ def restore_page():
     guard = _require_admin()
     if guard:
         return guard
+    if PG_MODE:
+        # There's no local SQLite file worth restoring from in PG_MODE —
+        # Supabase manages Postgres's own point-in-time recovery.
+        return render_template('restore.html', backups=[], health=None, pg_mode=True)
     return render_template('restore.html',
                            backups=_list_backup_files(),
                            health=_backup_health())
@@ -8171,6 +8898,9 @@ def restore_do():
     guard = _require_admin()
     if guard:
         return guard
+    if PG_MODE:
+        flash('Restoring from a local backup is not applicable on the hosted deployment.')
+        return redirect(url_for('restore_page'))
     chosen = (request.form.get('filename') or '').strip()
     try:
         # Reject anything that isn't a bare filename.

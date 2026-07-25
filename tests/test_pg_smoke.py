@@ -55,10 +55,11 @@ def pg_client(tmp_path):
     _prev_user_repo_pg_mode = _user_repository.PG_MODE
     _user_repository.PG_MODE = True
 
-    # SQLite-side paths still get exercised incidentally (init_db() always
-    # builds that schema too, remember_vehicle() etc. still write there) —
-    # point them at a throwaway temp dir so a local test run never touches
-    # the real bills.db, same reasoning as test_smoke.py's client fixture.
+    # init_db() early-returns in PG_MODE now (no SQLite schema/bootstrap at
+    # all) and every route/helper routes through Postgres — nothing here
+    # should ever touch bills.db. DB_PATH still points at a throwaway temp
+    # dir as a belt-and-suspenders guard, same reasoning as test_smoke.py's
+    # client fixture.
     db_dir = tmp_path / "munshi"
     db_dir.mkdir(parents=True, exist_ok=True)
     appmod.DB_PATH = str(db_dir / "bills.db")
@@ -85,9 +86,13 @@ def pg_client(tmp_path):
 
     yield client, username
 
-    session.execute(delete(PgUser).where(PgUser.username == username))
-    session.execute(delete(Organization).where(Organization.id == org.id))
-    session.commit()
+    session.rollback()
+    try:
+        session.execute(delete(PgUser).where(PgUser.username == username))
+        session.execute(delete(Organization).where(Organization.id == org.id))
+        session.commit()
+    except Exception:
+        session.rollback()
     pg_database.remove_session()
     appmod.PG_MODE = False
     appmod.ORG_ID = None
@@ -284,4 +289,55 @@ def test_admin_and_operator_portals_enforce_role_in_pg_mode(pg_client):
     finally:
         session = pg_database.get_session()
         session.execute(delete(PgUser).where(PgUser.username == operator_username))
+        session.commit()
+
+
+def test_user_management_routes_do_not_crash_in_pg_mode(pg_client):
+    """/users/<u>/reset-password, /deactivate, /activate, /role each call
+    auth_service._log_user_audit() — found (this round) to unconditionally
+    open a SQLite connection with no PG_MODE branch and no exception guard,
+    crashing every one of these admin actions with a 500 on the hosted
+    deployment. /users/add is already covered by the portals test above."""
+    from sqlalchemy import delete
+
+    from munshi.pg import database as pg_database
+    from munshi.pg.auth_models import User as PgUser
+
+    client, admin_username = pg_client
+    _setup(client, admin_username, 'Owner1234')
+
+    target_username = f'{admin_username}_target'
+    try:
+        token = _csrf(client)
+        client.post('/users/add', data={
+            'csrf_token': token, 'username': target_username,
+            'full_name': 'PG Test Target User', 'role': 'operator',
+        }, follow_redirects=False)
+
+        token = _csrf(client)
+        resp = client.post(f'/users/{target_username}/reset-password',
+                           data={'csrf_token': token}, follow_redirects=False)
+        assert resp.status_code == 302
+
+        token = _csrf(client)
+        resp = client.post(f'/users/{target_username}/deactivate',
+                           data={'csrf_token': token}, follow_redirects=False)
+        assert resp.status_code == 302
+
+        token = _csrf(client)
+        resp = client.post(f'/users/{target_username}/activate',
+                           data={'csrf_token': token}, follow_redirects=False)
+        assert resp.status_code == 302
+
+        token = _csrf(client)
+        resp = client.post(f'/users/{target_username}/role',
+                           data={'csrf_token': token, 'role': 'admin'}, follow_redirects=False)
+        assert resp.status_code == 302
+
+        listing = client.get('/users')
+        assert listing.status_code == 200
+        assert target_username.encode() in listing.data
+    finally:
+        session = pg_database.get_session()
+        session.execute(delete(PgUser).where(PgUser.username == target_username))
         session.commit()

@@ -70,9 +70,13 @@ def pg_client(tmp_path):
 
     yield client, username, org_id
 
-    session.execute(delete(PgUser).where(PgUser.username == username))
-    session.execute(delete(Organization).where(Organization.id == org.id))
-    session.commit()
+    session.rollback()
+    try:
+        session.execute(delete(PgUser).where(PgUser.username == username))
+        session.execute(delete(Organization).where(Organization.id == org.id))
+        session.commit()
+    except Exception:
+        session.rollback()
     pg_database.remove_session()
     appmod.PG_MODE = False
     appmod.ORG_ID = None

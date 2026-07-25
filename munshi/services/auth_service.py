@@ -185,15 +185,26 @@ def complete_setup(form):
     users.create(form.username, hash_password(form.password), form.username,
                  'admin', must_change_password=False)
 
-    conn = _app.get_db()
-    try:
-        _app.log_audit(conn, 'setup', 'user', None,
-                        summary=f'Initial setup completed by {form.username}', user=form.username)
-        conn.commit()
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    if users.PG_MODE:
+        from munshi.pg import database as pg_database
+        from munshi.pg.services import audit_service as pg_audit
+        try:
+            pg_session = pg_database.get_session()
+            pg_audit.log_audit(pg_session, _app.ORG_ID, 'setup', 'user', None,
+                               summary=f'Initial setup completed by {form.username}', user=form.username)
+            pg_session.commit()
+        except Exception:
+            pass
+    else:
+        conn = _app.get_db()
+        try:
+            _app.log_audit(conn, 'setup', 'user', None,
+                            summary=f'Initial setup completed by {form.username}', user=form.username)
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
 
     _app.set_setting('setup_complete', '1')
     return True, None, gstin_note
@@ -204,6 +215,14 @@ def load_demo_data(app_dir):
        Left on raw sqlite3 (via app.get_db()) rather than the ORM: it
        generically copies whichever tables exist in both DBs, which the
        per-table ORM models (Phase 0) aren't set up to do dynamically."""
+    if users.PG_MODE:
+        # Sample demo data is a desktop-installer sales-pitch feature (load a
+        # fake dataset to show off before the buyer sets up their own firm).
+        # The hosted deployment is one specific real business's live data —
+        # there's no "before setup" trial state to seed, and this SQLite
+        # table-copy has no Postgres equivalent.
+        return False, 'Sample demo data is not available on the hosted deployment.'
+
     import app as _app
 
     demo_path = os.path.join(app_dir, 'data', 'seed_demo.db')
@@ -277,25 +296,42 @@ def attempt_login(username, password):
     row = users.get_active_by_username(username)
     if row is not None and verify_password(password, row.password_hash):
         users.update_last_login(username)
-        conn = _app.get_db()
-        try:
-            _app.log_audit(conn, 'login', 'user', None,
-                            summary=f'User {row.username} signed in', user=row.username)
-            conn.commit()
-        finally:
-            conn.close()
+        if users.PG_MODE:
+            from munshi.pg import database as pg_database
+            from munshi.pg.services import audit_service as pg_audit
+            pg_session = pg_database.get_session()
+            pg_audit.log_audit(pg_session, _app.ORG_ID, 'login', 'user', None,
+                               summary=f'User {row.username} signed in', user=row.username)
+            pg_session.commit()
+        else:
+            conn = _app.get_db()
+            try:
+                _app.log_audit(conn, 'login', 'user', None,
+                                summary=f'User {row.username} signed in', user=row.username)
+                conn.commit()
+            finally:
+                conn.close()
         clear_login_failures(username)
         return 'ok', row
 
     record_login_failure(username)
-    conn = _app.get_db()
-    try:
-        _app.log_audit(conn, 'login_failed', 'user', None,
-                        summary=f'Failed sign-in for "{username or "unknown"}"',
-                        user=(username or 'unknown'))
-        conn.commit()
-    finally:
-        conn.close()
+    if users.PG_MODE:
+        from munshi.pg import database as pg_database
+        from munshi.pg.services import audit_service as pg_audit
+        pg_session = pg_database.get_session()
+        pg_audit.log_audit(pg_session, _app.ORG_ID, 'login_failed', 'user', None,
+                           summary=f'Failed sign-in for "{username or "unknown"}"',
+                           user=(username or 'unknown'))
+        pg_session.commit()
+    else:
+        conn = _app.get_db()
+        try:
+            _app.log_audit(conn, 'login_failed', 'user', None,
+                            summary=f'Failed sign-in for "{username or "unknown"}"',
+                            user=(username or 'unknown'))
+            conn.commit()
+        finally:
+            conn.close()
     return 'failed', None
 
 
@@ -304,11 +340,19 @@ def log_logout(user):
     if not user:
         return
     try:
-        conn = _app.get_db()
-        _app.log_audit(conn, 'logout', 'user', None,
-                        summary=f'User {user} signed out', user=user)
-        conn.commit()
-        conn.close()
+        if users.PG_MODE:
+            from munshi.pg import database as pg_database
+            from munshi.pg.services import audit_service as pg_audit
+            pg_session = pg_database.get_session()
+            pg_audit.log_audit(pg_session, _app.ORG_ID, 'logout', 'user', None,
+                               summary=f'User {user} signed out', user=user)
+            pg_session.commit()
+        else:
+            conn = _app.get_db()
+            _app.log_audit(conn, 'logout', 'user', None,
+                            summary=f'User {user} signed out', user=user)
+            conn.commit()
+            conn.close()
     except Exception:
         pass
 
@@ -387,6 +431,14 @@ def change_user_role(username, new_role):
 
 def _log_user_audit(action, username, summary):
     import app as _app
+    if users.PG_MODE:
+        from munshi.pg import database as pg_database
+        from munshi.pg.services import audit_service as pg_audit
+        pg_session = pg_database.get_session()
+        pg_audit.log_audit(pg_session, _app.ORG_ID, action, 'user', 0,
+                           summary=summary, user=current_user())
+        pg_session.commit()
+        return
     conn = _app.get_db()
     _app.log_audit(conn, action, 'user', 0, summary=summary)
     conn.commit()
